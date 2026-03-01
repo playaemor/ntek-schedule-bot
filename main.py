@@ -9,7 +9,9 @@ import os
 from datetime import datetime
 import hashlib
 import json
-
+from telebot.handler_backends import CancelUpdate
+from telebot import apihelper
+apihelper.ENABLE_MIDDLEWARE = True
 try:
     from config import (
         BOT_TOKEN, SUPER_ADMIN_ID, INITIAL_ADMIN_IDS,
@@ -36,6 +38,8 @@ if not os.path.exists(DATA_FOLDER):
 
 ADMIN_IDS = {SUPER_ADMIN_ID}.union(set(map(str, INITIAL_ADMIN_IDS)))
 ADMIN_FILE = os.path.join(DATA_FOLDER, "admins.json")
+BANNED_USERS_FILE = os.path.join(DATA_FOLDER, "banned_users.json")
+banned_users = set()
 
 ntek_url = NTЕK_SCHEDULE_URL
 
@@ -99,6 +103,61 @@ audit_log = []
 
 def is_admin(user_id):
     return str(user_id) in ADMIN_IDS
+
+def load_banned_users():
+    global banned_users
+    try:
+        if os.path.exists(BANNED_USERS_FILE):
+            with open(BANNED_USERS_FILE, 'r', encoding='utf-8') as f:
+                banned_users = set(json.load(f))
+    except Exception as e:
+        print(f"Ошибка загрузки забаненных пользователей: {e}")
+
+def save_banned_users():
+    try:
+        with open(BANNED_USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(banned_users), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения забаненных пользователей: {e}")
+
+def ban_user(identifier):
+    """
+    Блокирует пользователя по ID или @username.
+    Возвращает кортеж (успех: bool, сообщение: str)
+    """
+    identifier = str(identifier).strip()
+    target_id = None
+
+    # Если передан ID (состоит только из цифр)
+    if identifier.isdigit():
+        target_id = int(identifier)
+    # Если передан @username
+    elif identifier.startswith('@'):
+        # Ищем пользователя в вашем словаре user_names_data
+        for uid_str, uname in user_names_data.items():
+            if uname.lower() == identifier.lower():
+                target_id = int(uid_str)
+                break
+                
+        if not target_id:
+            return False, f"❌ Пользователь {identifier} не найден в базе бота."
+    else:
+        return False, "❌ Неверный формат. Укажите ID (число) или @username."
+
+    # Защита от бана администраторов
+    if is_admin(target_id):
+        return False, "❌ Нельзя забанить администратора."
+
+    # Добавляем в бан-лист и сохраняем
+    banned_users.add(target_id)
+    save_banned_users()
+    
+    # Если пользователь был в режиме чата с админом, сбрасываем его
+    clear_user_state(target_id)
+    
+    return True, f"✅ Пользователь {identifier} (ID: {target_id}) успешно заблокирован."
+
+# Команда для вызова функции админом (например: /ban @username)
 
 
 def get_main_keyboard(user_id):
@@ -698,6 +757,25 @@ def show_stats(message):
     """
     bot.send_message(message.chat.id, stats_text)
 
+@bot.message_handler(commands=['ban'])
+def handle_ban_command(message):
+    if not is_admin(message.chat.id):
+        return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.send_message(message.chat.id, "⚠️ Использование: /ban <ID или @username>")
+        return
+    
+    success, reply_text = ban_user(args[1])
+    bot.send_message(message.chat.id, reply_text)
+
+@bot.middleware_handler(update_types=['message', 'callback_query'])
+def block_banned_users(bot_instance, update):
+    user_id = update.from_user.id
+    if user_id in banned_users:
+        # CancelUpdate() мгновенно прерывает обработку события для этого пользователя
+        return CancelUpdate()
 
 @bot.message_handler(func=lambda message: message.text == '📢 Рассылка' and is_admin(message.chat.id))
 def request_broadcast(message):
@@ -1232,6 +1310,7 @@ def main():
     load_user_names()
     load_audit_log()
     check_schedule_updates()
+    load_banned_users()
     global is_first_check
     is_first_check = False
     scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
