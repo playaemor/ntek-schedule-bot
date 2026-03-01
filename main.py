@@ -9,9 +9,9 @@ import os
 from datetime import datetime
 import hashlib
 import json
-from telebot.handler_backends import CancelUpdate
+from telebot.handler_backends import BaseMiddleware, CancelUpdate
 from telebot import apihelper
-apihelper.ENABLE_MIDDLEWARE = True
+
 try:
     from config import (
         BOT_TOKEN, SUPER_ADMIN_ID, INITIAL_ADMIN_IDS,
@@ -31,8 +31,22 @@ if SUPER_ADMIN_ID == "ВАШ_TELEGRAM_ID" or not SUPER_ADMIN_ID:
     print("❌ Ошибка: SUPER_ADMIN_ID не заполнен в config.py")
     exit(1)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True)
 
+class BanMiddleware(BaseMiddleware):
+    def __init__(self):
+        super().__init__()
+        # Указываем, какие типы действий мы хотим перехватывать
+        self.update_types = ['message', 'callback_query']
+
+    def pre_process(self, update, data):
+        # Если ID пользователя есть в списке забаненных — жестко блокируем
+        if update.from_user.id in banned_users:
+            return CancelUpdate()
+
+    def post_process(self, update, data, exception):
+        pass
+bot.setup_middleware(BanMiddleware())
 if not os.path.exists(DATA_FOLDER):
     os.makedirs(DATA_FOLDER)
 
@@ -770,12 +784,6 @@ def handle_ban_command(message):
     success, reply_text = ban_user(args[1])
     bot.send_message(message.chat.id, reply_text)
 
-@bot.middleware_handler(update_types=['message', 'callback_query'])
-def block_banned_users(bot_instance, update):
-    user_id = update.from_user.id
-    if user_id in banned_users:
-        # CancelUpdate() мгновенно прерывает обработку события для этого пользователя
-        return CancelUpdate()
 
 @bot.message_handler(func=lambda message: message.text == '📢 Рассылка' and is_admin(message.chat.id))
 def request_broadcast(message):
