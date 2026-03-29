@@ -11,28 +11,23 @@ import hashlib
 import json
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
 from telebot import apihelper
-from flask import Flask, request, jsonify, send_file
-from waitress import serve
-import logging
-telebot.logger.setLevel(logging.DEBUG)
 
 try:
     from config import (
         BOT_TOKEN, SUPER_ADMIN_ID, INITIAL_ADMIN_IDS,
-        NTEK_SCHEDULE_URL, CHECK_INTERVAL, MESSAGE_COOLDOWN,
-        DATA_FOLDER, ENABLE_AUDIT_LOG, BROADCAST_COOLDOWN,
-        API_PORT, APP_API_KEY
+        NTЕK_SCHEDULE_URL, CHECK_INTERVAL, MESSAGE_COOLDOWN,
+        DATA_FOLDER, ENABLE_AUDIT_LOG, BROADCAST_COOLDOWN
     )
 except ImportError:
     print("❌ Ошибка: Файл config.py не найден!")
     print("Создайте файл config.py на основе config.example.py и заполните настройки")
     exit(1)
 
-if BOT_TOKEN == "..." or not BOT_TOKEN:
+if BOT_TOKEN == "ВАШ_ТОКЕН_БОТА" or not BOT_TOKEN:
     print("❌ Ошибка: BOT_TOKEN не заполнен в config.py")
     exit(1)
 
-if SUPER_ADMIN_ID == "..." or not SUPER_ADMIN_ID:
+if SUPER_ADMIN_ID == "ВАШ_TELEGRAM_ID" or not SUPER_ADMIN_ID:
     print("❌ Ошибка: SUPER_ADMIN_ID не заполнен в config.py")
     exit(1)
 
@@ -60,7 +55,7 @@ ADMIN_FILE = os.path.join(DATA_FOLDER, "admins.json")
 BANNED_USERS_FILE = os.path.join(DATA_FOLDER, "banned_users.json")
 banned_users = set()
 
-ntek_url = NTEK_SCHEDULE_URL
+ntek_url = NTЕK_SCHEDULE_URL
 
 USER_NAMES_FILE = os.path.join(DATA_FOLDER, "user_names.json")
 schedule_file = os.path.join(DATA_FOLDER, "last_schedule.jpg")
@@ -116,7 +111,7 @@ admin_keyboard.row('🔙 Главное меню')
 
 admin_reply_states = {}
 
-AUDIT_FILE = "os.path.join(DATA_FOLDER, audit_log.json)"
+AUDIT_FILE = os.path.join(DATA_FOLDER, "audit_log.json")
 audit_log = []
 
 
@@ -1313,108 +1308,7 @@ def load_last_hashes():
         last_teachers_schedule_hash = calculate_file_hash(teachers_schedule_file)
     if os.path.exists(student_schedule_file):
         last_student_schedule_hash = calculate_file_hash(student_schedule_file)
-# ==========================================
-# REST API ДЛЯ ANDROID-ПРИЛОЖЕНИЯ
-# ==========================================
-app = Flask(__name__)
 
-def check_auth():
-    return request.headers.get("X-API-Key") == APP_API_KEY # Берется из config.py
-
-@app.route('/api/users', methods=['GET'])
-def api_users():
-    if not check_auth(): return jsonify({"error": "Unauthorized"}), 401
-    
-    users_list = []
-    # Защита: если users.txt пустой, user_ids может не быть
-    current_users = globals().get('user_ids', []) 
-    
-    for uid in current_users:
-        name = f"ID: {uid}" # Имя по умолчанию
-        try:
-            # Безопасно пытаемся достать имя, если словарь существует
-            unames = globals().get('user_names', {})
-            if str(uid) in unames:
-                name = unames[str(uid)]
-        except Exception:
-            pass
-            
-        users_list.append({"id": str(uid), "name": name})
-        
-    return jsonify({"users": users_list})
-
-@app.route('/api/chat/<int:user_id>', methods=['GET', 'POST'])
-def api_chat(user_id):
-    if not check_auth(): return jsonify({"error": "Unauthorized"}), 401
-    
-    if request.method == 'GET':
-        msgs = load_messages()
-        # Ищем сообщения только этого юзера (и ответы админа ему)
-        user_msgs = [m for m in msgs if m.get('user_id') == user_id]
-        return jsonify({"messages": user_msgs})
-        
-    elif request.method == 'POST':
-        text = request.json.get("text")
-        try:
-            bot.send_message(user_id, f"👨‍💻 Ответ администратора:\n\n{text}")
-            # Сохраняем ответ админа в историю (имя ставим Admin)
-            save_message(user_id, "Admin", text, "text") 
-            return jsonify({"success": True})
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)})
-
-@app.route('/api/broadcast_media', methods=['POST'])
-def api_broadcast_media():
-    if not check_auth(): return jsonify({"error": "Unauthorized"}), 401
-    text = request.form.get("text", "")
-    photos = request.files.getlist("photos") # Получаем список файлов
-    
-    success = 0
-    try:
-        if photos and len(photos) > 0:
-            media_group = []
-            for i, photo in enumerate(photos):
-                # Текст лепим только к первой картинке
-                caption = text if i == 0 else None
-                media_group.append(InputMediaPhoto(photo.read(), caption=caption))
-            for uid in user_ids:
-                try:
-                    bot.send_media_group(uid, media_group)
-                    success += 1
-                except: pass
-        else:
-            for uid in user_ids:
-                try:
-                    bot.send_message(uid, text)
-                    success += 1
-                except: pass
-        return jsonify({"success": True, "sent": success})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
-@app.route('/api/schedule/<stype>', methods=['GET'])
-def api_schedule(stype):
-    if not check_auth(): return "Unauthorized", 401
-    
-    # Безопасно достаем пути к файлам из глобальных переменных твоего скрипта
-    paths = {
-        "student": globals().get('student_schedule_file') or globals().get('schedule_file', 'data/schedule.jpg'),
-        "teacher": globals().get('teachers_schedule_file', 'data/teachers.jpg'),
-        "bells": globals().get('bells_schedule_file', 'data/bells.jpg')
-    }
-    
-    file_path = paths.get(stype)
-    
-    # Проверяем, существует ли файл физически на сервере
-    if file_path and os.path.exists(file_path):
-        return send_file(file_path, mimetype='image/jpeg')
-    else:
-        # Если файла нет, возвращаем ошибку 404, а не ломаем сервер
-        return "Расписание еще не скачано ботом", 404
-
-def run_flask():
-    serve(app, host='0.0.0.0', port=API_PORT)
-# ==========================================
 
 def main():
     load_users()
@@ -1429,11 +1323,6 @@ def main():
     is_first_check = False
     scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
     scheduler_thread.start()
-
-    threading.Thread(target=schedule_checker, daemon=True).start()
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    
     bot.infinity_polling()
 
 
