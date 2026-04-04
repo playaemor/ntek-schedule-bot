@@ -417,21 +417,35 @@ def check_schedule_updates():
 
 def download_and_check_update(url, temp_file, target_file, last_hash, schedule_type):
     try:
-        img_response = requests.get(url, headers=headers, timeout=30)
+        # Включаем stream=True для потоковой загрузки (не забивает ОЗУ)
+        img_response = requests.get(url, headers=headers, timeout=30, stream=True)
         img_response.raise_for_status()
+        
+        # Лимит размера файла: 5 Мегабайт
+        MAX_SIZE = 5 * 1024 * 1024 
+        downloaded_size = 0
+        
         with open(temp_file, 'wb') as f:
-            f.write(img_response.content)
+            for chunk in img_response.iter_content(chunk_size=8192):
+                downloaded_size += len(chunk)
+                if downloaded_size > MAX_SIZE:
+                    raise ValueError(f"Файл расписания слишком большой (> 5MB). Загрузка прервана.")
+                f.write(chunk)
+                
         current_hash = calculate_file_hash(temp_file)
         if current_hash != last_hash:
-            if os.path.exists(target_file): os.remove(target_file)
+            if os.path.exists(target_file): 
+                os.remove(target_file)
             os.rename(temp_file, target_file)
             return True
         else:
             os.remove(temp_file)
             return False
+            
     except Exception as e:
         print(f"Ошибка при обработке расписания {schedule_type}: {e}")
-        if os.path.exists(temp_file): os.remove(temp_file)
+        if os.path.exists(temp_file): 
+            os.remove(temp_file)
         return False
 
 
