@@ -152,7 +152,7 @@ def ban_user(identifier):
             if uname.lower() == identifier.lower():
                 target_id = int(uid_str)
                 break
-                
+
         if not target_id:
             return False, f"❌ Пользователь {identifier} не найден в базе бота."
     else:
@@ -165,10 +165,10 @@ def ban_user(identifier):
     # Добавляем в бан-лист и сохраняем
     banned_users.add(target_id)
     save_banned_users()
-    
+
     # Если пользователь был в режиме чата с админом, сбрасываем его
     clear_user_state(target_id)
-    
+
     return True, f"✅ Пользователь {identifier} (ID: {target_id}) успешно заблокирован."
 
 # Команда для вызова функции админом (например: /ban @username)
@@ -180,9 +180,7 @@ def get_main_keyboard(user_id):
     keyboard.row('🔔 Расписание звонков', '📝 Расписание от учащихся')
     keyboard.row('📩 Написать админу', '🌟 Поддержать проект')
     if is_admin(user_id):
-        keyboard.row('ℹ️ Помощь', '👨‍💻 Админ-панель')
-    else:
-        keyboard.row('ℹ️ Помощь')
+        keyboard.row('👨‍💻 Админ-панель')
     return keyboard
 
 
@@ -420,31 +418,31 @@ def download_and_check_update(url, temp_file, target_file, last_hash, schedule_t
         # Включаем stream=True для потоковой загрузки (не забивает ОЗУ)
         img_response = requests.get(url, headers=headers, timeout=30, stream=True)
         img_response.raise_for_status()
-        
+
         # Лимит размера файла: 5 Мегабайт
-        MAX_SIZE = 5 * 1024 * 1024 
+        MAX_SIZE = 5 * 1024 * 1024
         downloaded_size = 0
-        
+
         with open(temp_file, 'wb') as f:
             for chunk in img_response.iter_content(chunk_size=8192):
                 downloaded_size += len(chunk)
                 if downloaded_size > MAX_SIZE:
                     raise ValueError(f"Файл расписания слишком большой (> 5MB). Загрузка прервана.")
                 f.write(chunk)
-                
+
         current_hash = calculate_file_hash(temp_file)
         if current_hash != last_hash:
-            if os.path.exists(target_file): 
+            if os.path.exists(target_file):
                 os.remove(target_file)
             os.rename(temp_file, target_file)
             return True
         else:
             os.remove(temp_file)
             return False
-            
+
     except Exception as e:
         print(f"Ошибка при обработке расписания {schedule_type}: {e}")
-        if os.path.exists(temp_file): 
+        if os.path.exists(temp_file):
             os.remove(temp_file)
         return False
 
@@ -529,7 +527,7 @@ def save_audit_log():
 def log_admin_action(admin_id, action, details):
     if not ENABLE_AUDIT_LOG:
         return
-    
+
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     admin_username = ""
     try:
@@ -760,7 +758,7 @@ def send_help(message):
     - 🔔 Расписание звонков: время занятий и перерывов.
     - 📝 Расписание от учащихся: расписание, которое вы нам скидываете.
     - 📩 Написать админу: перейти в режим общения с администратором (поддерживаются текст, фото, голосовые, видеокружки).
-    - 🌟 Поддержать проект: помочь в развитии бота с помощью Telegram Stars.
+    - 🌟 Поддержать проект.
 
     ⏰ Бот автоматически проверяет обновления каждые 10 минут.
     """
@@ -789,12 +787,12 @@ def show_stats(message):
 def handle_ban_command(message):
     if not is_admin(message.chat.id):
         return
-    
+
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         bot.send_message(message.chat.id, "⚠️ Использование: /ban <ID или @username>")
         return
-    
+
     success, reply_text = ban_user(args[1])
     bot.send_message(message.chat.id, reply_text)
 
@@ -1210,8 +1208,6 @@ def handle_text_messages(message):
         process_admin_chat_message(message)
         return
 
-    if message.text == 'ℹ️ Помощь':
-        send_help(message)
 
     if message.text == '📊 Аудит' and is_admin(message.chat.id):
         events = get_recent_audit_events(20)
