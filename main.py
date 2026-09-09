@@ -1,11 +1,14 @@
 import telebot
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import re
 import time
 import threading
 import os
+import shutil
 from datetime import datetime
 import hashlib
 import json
@@ -50,10 +53,55 @@ bot.setup_middleware(BanMiddleware())
 if not os.path.exists(DATA_FOLDER):
     os.makedirs(DATA_FOLDER)
 
+ARCHIVE_FOLDER = os.path.join(DATA_FOLDER, "archive")
+if not os.path.exists(ARCHIVE_FOLDER):
+    os.makedirs(ARCHIVE_FOLDER)
+
+file_io_lock = threading.Lock()
+
+http_session = requests.Session()
+retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+http_session.mount('https://', HTTPAdapter(max_retries=retry_strategy))
+http_session.mount('http://', HTTPAdapter(max_retries=retry_strategy))
+
+def atomic_save_json(filepath, data, indent=2):
+    """Атомарное сохранение JSON: пишет во временный файл и заменяет оригинал.
+    Гарантирует целостность данных при перезагрузках хостинга."""
+    temp_filepath = f"{filepath}.tmp"
+    with file_io_lock:
+        try:
+            with open(temp_filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=indent)
+            os.replace(temp_filepath, filepath)
+        except Exception as e:
+            if os.path.exists(temp_filepath):
+                try:
+                    os.remove(temp_filepath)
+                except Exception:
+                    pass
+            print(f"Ошибка сохранения {filepath}: {e}")
+
+def archive_schedule(source_file, schedule_type):
+    """Сохраняет новое расписание в исторический архив в отдельную папку."""
+    try:
+        now_str = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        archive_dir = os.path.join(ARCHIVE_FOLDER, f"{now_str}_{schedule_type}")
+        os.makedirs(archive_dir, exist_ok=True)
+        ext = os.path.splitext(source_file)[1] or ".jpg"
+        archive_file = os.path.join(archive_dir, f"расписание_{schedule_type}{ext}")
+        shutil.copy2(source_file, archive_file)
+        print(f"📦 Расписание сохранено в архив: {archive_file}")
+        return archive_file
+    except Exception as e:
+        print(f"Ошибка архивации расписания ({schedule_type}): {e}")
+        return None
+
 ADMIN_IDS = {SUPER_ADMIN_ID}.union(set(map(str, INITIAL_ADMIN_IDS)))
 ADMIN_FILE = os.path.join(DATA_FOLDER, "admins.json")
 BANNED_USERS_FILE = os.path.join(DATA_FOLDER, "banned_users.json")
+MUTED_USERS_FILE = os.path.join(DATA_FOLDER, "muted_users.json")
 banned_users = set()
+muted_users = {}
 
 ntek_url = NTЕK_SCHEDULE_URL
 
@@ -105,9 +153,17 @@ admin_keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
 admin_keyboard.row('📊 Статистика', '📢 Рассылка')
 admin_keyboard.row('🔄 Обновить расписание звонков', '🔄 Обновить расписание от учащихся')
 admin_keyboard.row('📨 Просмотреть сообщения', '📨 Ответить пользователю')
+admin_keyboard.row('🚫 Забанить', '✅ Разбанить')
+admin_keyboard.row('🔇 Выдать мут', '🔊 Снять мут')
 admin_keyboard.row('➕ Добавить админа', '➖ Удалить админа')
-admin_keyboard.row('📊 Аудит', '📁 Файлы')
-admin_keyboard.row('🔙 Главное меню')
+admin_keyboard.row('📁 Файлы', '🔙 Главное меню')
+
+files_keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+files_keyboard.row('📄 audit_log.json', '👥 user_names.json')
+files_keyboard.row('📋 admins.json', '👥 users.txt')
+files_keyboard.row('🚫 banned_users.json', '🔇 muted_users.json')
+files_keyboard.row('📦 Архив расписаний')
+files_keyboard.row('👨‍💻 Админ-панель', '🔙 Главное меню')
 
 admin_reply_states = {}
 
@@ -118,6 +174,25 @@ audit_log = []
 def is_admin(user_id):
     return str(user_id) in ADMIN_IDS
 
+def resolve_user_id(identifier):
+    """
+    Разрешает ID пользователя по числу или @username из базы.
+    Возвращает (user_id: int, identifier_str: str) или (None, error_msg: str).
+    """
+    if not identifier:
+        return None, "❌ Укажите ID или @username пользователя."
+    raw = str(identifier).strip()
+    if raw.isdigit():
+        return int(raw), None
+    if raw.startswith('@'):
+        target_uname = raw.lower()
+        for uid_str, uname in user_names_data.items():
+            if uname.lower() == target_uname:
+                return int(uid_str), None
+        return None, f"❌ Пользователь {raw} не найден в базе бота."
+    return None, "❌ Неверный формат. Укажите ID (число) или @username."
+
+
 def load_banned_users():
     global banned_users
     try:
@@ -127,51 +202,167 @@ def load_banned_users():
     except Exception as e:
         print(f"Ошибка загрузки забаненных пользователей: {e}")
 
+
 def save_banned_users():
-    try:
-        with open(BANNED_USERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(list(banned_users), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения забаненных пользователей: {e}")
+    atomic_save_json(BANNED_USERS_FILE, list(banned_users))
+
 
 def ban_user(identifier):
     """
     Блокирует пользователя по ID или @username.
     Возвращает кортеж (успех: bool, сообщение: str)
     """
-    identifier = str(identifier).strip()
-    target_id = None
-
-    # Если передан ID (состоит только из цифр)
-    if identifier.isdigit():
-        target_id = int(identifier)
-    # Если передан @username
-    elif identifier.startswith('@'):
-        # Ищем пользователя в вашем словаре user_names_data
-        for uid_str, uname in user_names_data.items():
-            if uname.lower() == identifier.lower():
-                target_id = int(uid_str)
-                break
-
-        if not target_id:
-            return False, f"❌ Пользователь {identifier} не найден в базе бота."
-    else:
-        return False, "❌ Неверный формат. Укажите ID (число) или @username."
+    target_id, error = resolve_user_id(identifier)
+    if not target_id:
+        return False, error
 
     # Защита от бана администраторов
     if is_admin(target_id):
         return False, "❌ Нельзя забанить администратора."
 
+    if target_id in banned_users:
+        return False, f"ℹ️ Пользователь {identifier} (ID: {target_id}) уже заблокирован."
+
     # Добавляем в бан-лист и сохраняем
     banned_users.add(target_id)
     save_banned_users()
 
-    # Если пользователь был в режиме чата с админом, сбрасываем его
+    # Сбрасываем режим общения, если пользователь был в нем
     clear_user_state(target_id)
 
     return True, f"✅ Пользователь {identifier} (ID: {target_id}) успешно заблокирован."
 
-# Команда для вызова функции админом (например: /ban @username)
+
+def unban_user(identifier):
+    """
+    Разблокирует пользователя по ID или @username.
+    Возвращает кортеж (успех: bool, сообщение: str)
+    """
+    target_id, error = resolve_user_id(identifier)
+    if not target_id:
+        return False, error
+
+    if target_id not in banned_users:
+        return False, f"ℹ️ Пользователь {identifier} (ID: {target_id}) не находится в списке заблокированных."
+
+    banned_users.remove(target_id)
+    save_banned_users()
+
+    return True, f"✅ Пользователь {identifier} (ID: {target_id}) успешно разблокирован."
+
+
+def load_muted_users():
+    global muted_users
+    try:
+        if os.path.exists(MUTED_USERS_FILE):
+            with open(MUTED_USERS_FILE, 'r', encoding='utf-8') as f:
+                muted_users = json.load(f)
+    except Exception as e:
+        print(f"Ошибка загрузки замученных пользователей: {e}")
+        muted_users = {}
+
+
+def save_muted_users():
+    atomic_save_json(MUTED_USERS_FILE, muted_users)
+
+
+def parse_duration(time_str):
+    """
+    Парсит строку длительности: 30m (минуты), 2h (часы), 1d (дни), 1w (недели).
+    Либо просто число (интерпретируется как минуты).
+    Возвращает количество секунд или None.
+    """
+    if not time_str:
+        return None
+    time_str = time_str.strip().lower()
+    units = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+    unit = time_str[-1]
+    if unit in units and time_str[:-1].isdigit():
+        return int(time_str[:-1]) * units[unit]
+    if time_str.isdigit():
+        return int(time_str) * 60
+    return None
+
+
+def is_muted(user_id):
+    """Проверяет, замучен ли пользователь. Автоматически снимает мут, если время вышло."""
+    uid_str = str(user_id)
+    if uid_str not in muted_users:
+        return False
+    until = muted_users[uid_str]
+    if until is None:
+        return True
+    if time.time() > until:
+        del muted_users[uid_str]
+        save_muted_users()
+        return False
+    return True
+
+
+def get_mute_info(user_id):
+    """Возвращает форматированную строку с информацией о муте."""
+    uid_str = str(user_id)
+    if uid_str not in muted_users:
+        return None
+    until = muted_users[uid_str]
+    if until is None:
+        return "навсегда"
+    remaining = int(until - time.time())
+    if remaining <= 0:
+        return None
+    hours = remaining // 3600
+    minutes = (remaining % 3600) // 60
+    until_str = datetime.fromtimestamp(until).strftime('%d.%m.%Y %H:%M')
+    if hours > 0:
+        return f"до {until_str} (осталось {hours}ч {minutes}м)"
+    return f"до {until_str} (осталось {minutes}м)"
+
+
+def mute_user(identifier, duration_str=None):
+    """
+    Ограничивает пользователя в отправке сообщений админам.
+    Возвращает кортеж (успех: bool, сообщение: str)
+    """
+    target_id, error = resolve_user_id(identifier)
+    if not target_id:
+        return False, error
+
+    if is_admin(target_id):
+        return False, "❌ Нельзя выдать мут администратору."
+
+    until = None
+    duration_text = "навсегда"
+    if duration_str:
+        seconds = parse_duration(duration_str)
+        if seconds is None:
+            return False, "❌ Неверный формат времени. Используйте: 30m, 2h, 1d (или оставьте пустым для мута навсегда)."
+        until = time.time() + seconds
+        duration_text = f"до {datetime.fromtimestamp(until).strftime('%d.%m.%Y %H:%M')} ({duration_str})"
+
+    muted_users[str(target_id)] = until
+    save_muted_users()
+    clear_user_state(target_id)
+
+    return True, f"🔇 Пользователю {identifier} (ID: {target_id}) выдан мут: {duration_text}."
+
+
+def unmute_user(identifier):
+    """
+    Снимает мут с пользователя.
+    Возвращает кортеж (успех: bool, сообщение: str)
+    """
+    target_id, error = resolve_user_id(identifier)
+    if not target_id:
+        return False, error
+
+    uid_str = str(target_id)
+    if uid_str not in muted_users:
+        return False, f"ℹ️ Пользователь {identifier} (ID: {target_id}) не имеет активного мута."
+
+    del muted_users[uid_str]
+    save_muted_users()
+
+    return True, f"🔊 С пользователя {identifier} (ID: {target_id}) успешно снят мут."
 
 
 def get_main_keyboard(user_id):
@@ -208,11 +399,7 @@ def handle_cancellation(message, message_text):
 
 
 def save_admins():
-    try:
-        with open(ADMIN_FILE, 'w', encoding='utf-8') as f:
-            json.dump(list(ADMIN_IDS), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения администраторов: {e}")
+    atomic_save_json(ADMIN_FILE, list(ADMIN_IDS))
 
 
 def load_admins():
@@ -233,11 +420,7 @@ def load_admins():
 
 
 def save_schedule_file_ids():
-    try:
-        with open('schedule_file_ids.json', 'w', encoding='utf-8') as f:
-            json.dump(schedule_file_ids, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения file_id расписаний: {e}")
+    atomic_save_json('schedule_file_ids.json', schedule_file_ids)
 
 
 def load_schedule_file_ids():
@@ -252,11 +435,7 @@ def load_schedule_file_ids():
 
 
 def save_user_names():
-    try:
-        with open(USER_NAMES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_names_data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"Ошибка сохранения юзернеймов: {e}")
+    atomic_save_json(USER_NAMES_FILE, user_names_data, indent=4)
 
 
 def load_user_names():
@@ -283,29 +462,32 @@ def update_user_name_info(user):
         save_user_names()
 
 
+last_message_times = {}
+
 def load_last_message_times():
+    global last_message_times
     if not os.path.exists(last_message_time_file):
-        return {}
+        last_message_times = {}
+        return last_message_times
     try:
         with open(last_message_time_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            last_message_times = json.load(f)
+            return last_message_times
     except Exception as e:
         print(f"Ошибка загрузки времени сообщений: {e}")
+        last_message_times = {}
         return {}
 
 
-def save_last_message_times(data):
-    try:
-        with open(last_message_time_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения времени сообщений: {e}")
+def save_last_message_times(data=None):
+    if data is None:
+        data = last_message_times
+    atomic_save_json(last_message_time_file, data)
 
 
 def can_send_message(user_id):
     if get_user_state(user_id) == ADMIN_CHAT_MODE:
         return True
-    last_message_times = load_last_message_times()
     user_id_str = str(user_id)
     if user_id_str not in last_message_times:
         return True
@@ -313,7 +495,6 @@ def can_send_message(user_id):
 
 
 def get_cooldown_remaining(user_id):
-    last_message_times = load_last_message_times()
     user_id_str = str(user_id)
     if user_id_str not in last_message_times:
         return 0
@@ -322,9 +503,8 @@ def get_cooldown_remaining(user_id):
 
 
 def update_last_message_time(user_id):
-    last_message_times = load_last_message_times()
     last_message_times[str(user_id)] = time.time()
-    save_last_message_times(last_message_times)
+    save_last_message_times()
 
 
 def calculate_file_hash(filename):
@@ -358,8 +538,7 @@ def save_message(user_id, username, message_text, message_type="text", file_id=N
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'replied': False
         }
         messages.append(new_message)
-        with open(messages_file, 'w', encoding='utf-8') as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
+        atomic_save_json(messages_file, messages)
         return new_message['id']
     except Exception as e:
         print(f"Ошибка сохранения сообщения: {e}")
@@ -373,8 +552,7 @@ def mark_message_as_replied(message_id):
             if message['id'] == message_id:
                 message['replied'] = True
                 break
-        with open(messages_file, 'w', encoding='utf-8') as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
+        atomic_save_json(messages_file, messages)
         return True
     except Exception as e:
         print(f"Ошибка отметки сообщения: {e}")
@@ -384,7 +562,7 @@ def mark_message_as_replied(message_id):
 def check_schedule_updates():
     global last_schedule_hash, last_teachers_schedule_hash, is_first_check
     try:
-        response = requests.get(ntek_url, headers=headers, timeout=30)
+        response = http_session.get(ntek_url, headers=headers, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         schedule_link = soup.find('a', string=re.compile(r'Расписание для учащихся', re.IGNORECASE))
@@ -416,7 +594,7 @@ def check_schedule_updates():
 def download_and_check_update(url, temp_file, target_file, last_hash, schedule_type):
     try:
         # Включаем stream=True для потоковой загрузки (не забивает ОЗУ)
-        img_response = requests.get(url, headers=headers, timeout=30, stream=True)
+        img_response = http_session.get(url, headers=headers, timeout=30, stream=True)
         img_response.raise_for_status()
 
         # Лимит размера файла: 5 Мегабайт
@@ -435,6 +613,8 @@ def download_and_check_update(url, temp_file, target_file, last_hash, schedule_t
             if os.path.exists(target_file):
                 os.remove(target_file)
             os.rename(temp_file, target_file)
+            # Сохранение в архив в отдельную папку
+            archive_schedule(target_file, schedule_type)
             return True
         else:
             os.remove(temp_file)
@@ -451,12 +631,34 @@ def send_update_notification(updates):
     if not user_ids: return
     update_text = "🔄 Обновлено расписание: " + ", ".join(updates)
     success_count = 0
+    dead_users = set()
+
     for user_id in list(user_ids):
         try:
             bot.send_message(user_id, update_text)
             success_count += 1
+            time.sleep(0.04)  # ~25 сообщений в секунду для соблюдения лимитов Telegram API
+        except apihelper.ApiTelegramException as e:
+            if e.error_code == 429:
+                retry_after = e.result_json.get('parameters', {}).get('retry_after', 2)
+                time.sleep(retry_after)
+                try:
+                    bot.send_message(user_id, update_text)
+                    success_count += 1
+                except Exception:
+                    pass
+            elif e.error_code in (403, 400) and any(err in str(e).lower() for err in ["blocked", "deactivated", "chat not found"]):
+                dead_users.add(user_id)
+            else:
+                print(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
         except Exception as e:
             print(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
+
+    if dead_users:
+        user_ids.difference_update(dead_users)
+        save_users()
+        print(f"Удалено {len(dead_users)} неактивных/заблокировавших пользователей.")
+
     print(f"Уведомления отправлены: {success_count}/{len(user_ids)}")
 
 
@@ -517,11 +719,7 @@ def load_audit_log():
 
 
 def save_audit_log():
-    try:
-        with open(AUDIT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(audit_log, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения аудита: {e}")
+    atomic_save_json(AUDIT_FILE, audit_log)
 
 
 def log_admin_action(admin_id, action, details):
@@ -553,8 +751,9 @@ def get_recent_audit_events(limit=20):
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     user_id = message.chat.id
-    user_ids.add(user_id)
-    save_users()
+    if user_id not in user_ids:
+        user_ids.add(user_id)
+        save_users()
     update_user_name_info(message.from_user)
     welcome_text = """
     👋 Добро пожаловать! Я неофициальный бот расписания НТЭК.
@@ -643,6 +842,11 @@ def send_student_created_schedule(message):
 def write_to_admin(message):
     update_user_name_info(message.from_user)
     user_id = message.chat.id
+    if is_muted(user_id):
+        mute_info = get_mute_info(user_id) or "навсегда"
+        bot.send_message(user_id, f"🔇 Вы ограничены в отправке сообщений администраторам ({mute_info}).",
+                         reply_markup=get_main_keyboard(user_id))
+        return
     if not can_send_message(user_id):
         cooldown = get_cooldown_remaining(user_id)
         minutes, seconds = int(cooldown // 60), int(cooldown % 60)
@@ -677,6 +881,12 @@ def end_admin_chat(message):
 
 def process_admin_chat_message(message):
     user_id = message.chat.id
+    if is_muted(user_id):
+        clear_user_state(user_id)
+        mute_info = get_mute_info(user_id) or "навсегда"
+        bot.send_message(user_id, f"🔇 Вы ограничены в отправке сообщений администраторам ({mute_info}).",
+                         reply_markup=get_main_keyboard(user_id))
+        return
     username = message.from_user.username or f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip() or "Без имени"
     message_text, message_type, file_id_val = "", "", None
 
@@ -747,7 +957,15 @@ def admin_panel(message):
     if not is_admin(message.chat.id):
         bot.send_message(message.chat.id, "❌ Доступ запрещен")
         return
-    bot.send_message(message.chat.id, "👨‍💻 Панель администратора", reply_markup=admin_keyboard)
+    text = (
+        "👨‍💻 Панель администратора\n\n"
+        "Команды модерации:\n"
+        "• /ban <ID или @username> — полная блокировка\n"
+        "• /unban <ID или @username> — разбан\n"
+        "• /mute <ID или @username> [10m, 2h, 1d] — мут в чате с админом\n"
+        "• /unmute <ID или @username> — снять мут"
+    )
+    bot.send_message(message.chat.id, text, reply_markup=admin_keyboard)
 
 
 def send_help(message):
@@ -774,6 +992,8 @@ def show_stats(message):
     - 👥 Пользователей (ID): {len(user_ids)}
     - 👥 Пользователей (Names): {len(user_names_data)}
     - 👮‍♂️ Администраторов: {len(ADMIN_IDS)}
+    - 🚫 Заблокированных (бан): {len(banned_users)}
+    - 🔇 Ограниченных (мут): {len(muted_users)}
     - 📨 Всего сообщений: {len(messages)}
     - ❓ Неотвеченных: {unanswered_count}
     - 📅 Расписание учащихся: {'✅' if os.path.exists(schedule_file) else '❌'}
@@ -786,6 +1006,7 @@ def show_stats(message):
 @bot.message_handler(commands=['ban'])
 def handle_ban_command(message):
     if not is_admin(message.chat.id):
+        bot.send_message(message.chat.id, "❌ Эта команда доступна только администраторам.")
         return
 
     args = message.text.split(maxsplit=1)
@@ -794,7 +1015,196 @@ def handle_ban_command(message):
         return
 
     success, reply_text = ban_user(args[1])
+    if success:
+        try:
+            log_admin_action(message.chat.id, "бан", f"Пользователь: {args[1]}")
+        except Exception:
+            pass
     bot.send_message(message.chat.id, reply_text)
+
+
+@bot.message_handler(commands=['unban'])
+def handle_unban_command(message):
+    if not is_admin(message.chat.id):
+        bot.send_message(message.chat.id, "❌ Эта команда доступна только администраторам.")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.send_message(message.chat.id, "⚠️ Использование: /unban <ID или @username>")
+        return
+
+    success, reply_text = unban_user(args[1])
+    if success:
+        try:
+            log_admin_action(message.chat.id, "разбан", f"Пользователь: {args[1]}")
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, reply_text)
+
+
+@bot.message_handler(commands=['mute'])
+def handle_mute_command(message):
+    if not is_admin(message.chat.id):
+        bot.send_message(message.chat.id, "❌ Эта команда доступна только администраторам.")
+        return
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Использование: /mute <ID или @username> [время: 10m, 2h, 1d]\n"
+            "Пример: /mute @username 2h (мут на 2 часа)\n"
+            "Если время не указано — мут бессрочный."
+        )
+        return
+
+    target = parts[1]
+    duration = parts[2] if len(parts) > 2 else None
+    success, reply_text = mute_user(target, duration)
+    if success:
+        try:
+            log_admin_action(message.chat.id, "мут", f"Пользователь: {target}, длительность: {duration or 'навсегда'}")
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, reply_text)
+
+
+@bot.message_handler(commands=['unmute'])
+def handle_unmute_command(message):
+    if not is_admin(message.chat.id):
+        bot.send_message(message.chat.id, "❌ Эта команда доступна только администраторам.")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.send_message(message.chat.id, "⚠️ Использование: /unmute <ID или @username>")
+        return
+
+    success, reply_text = unmute_user(args[1])
+    if success:
+        try:
+            log_admin_action(message.chat.id, "размут", f"Пользователь: {args[1]}")
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, reply_text)
+
+
+@bot.message_handler(func=lambda message: message.text == '🚫 Забанить' and is_admin(message.chat.id))
+def request_ban_button(message):
+    msg = bot.send_message(
+        message.chat.id,
+        "🚫 Введите ID (число) или @username пользователя для блокировки. Или нажмите 'Отмена'.",
+        reply_markup=cancel_keyboard
+    )
+    bot.register_next_step_handler(msg, process_ban_step)
+
+
+def process_ban_step(message):
+    if handle_cancellation(message, "Отмена блокировки."):
+        return
+    target = message.text.strip()
+    success, reply_text = ban_user(target)
+    if success:
+        try:
+            log_admin_action(message.chat.id, "бан", f"Пользователь: {target}")
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, reply_text, reply_markup=admin_keyboard)
+
+
+@bot.message_handler(func=lambda message: message.text == '✅ Разбанить' and is_admin(message.chat.id))
+def request_unban_button(message):
+    if not banned_users:
+        bot.send_message(message.chat.id, "ℹ️ Список заблокированных пользователей пуст.", reply_markup=admin_keyboard)
+        return
+    banned_list_text = "🚫 Заблокированные пользователи:\n"
+    for uid in list(banned_users)[:20]:
+        uname = user_names_data.get(str(uid), "")
+        banned_list_text += f"• ID: {uid} ({uname})\n"
+    banned_list_text += "\nВведите ID или @username для разблокировки. Или нажмите 'Отмена'."
+    msg = bot.send_message(message.chat.id, banned_list_text, reply_markup=cancel_keyboard)
+    bot.register_next_step_handler(msg, process_unban_step)
+
+
+def process_unban_step(message):
+    if handle_cancellation(message, "Отмена разблокировки."):
+        return
+    target = message.text.strip()
+    success, reply_text = unban_user(target)
+    if success:
+        try:
+            log_admin_action(message.chat.id, "разбан", f"Пользователь: {target}")
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, reply_text, reply_markup=admin_keyboard)
+
+
+@bot.message_handler(func=lambda message: message.text == '🔇 Выдать мут' and is_admin(message.chat.id))
+def request_mute_button(message):
+    prompt_text = (
+        "🔇 Введите ID или @username пользователя, а также опционально время через пробел.\n\n"
+        "Форматы времени:\n"
+        "• 30m — 30 минут\n"
+        "• 2h — 2 часа\n"
+        "• 1d — 1 день\n"
+        "• 1w — 1 неделя\n\n"
+        "Примеры:\n"
+        "• `@username 2h` (мут на 2 часа)\n"
+        "• `123456789` (мут навсегда)\n\n"
+        "Или нажмите 'Отмена'."
+    )
+    msg = bot.send_message(message.chat.id, prompt_text, reply_markup=cancel_keyboard)
+    bot.register_next_step_handler(msg, process_mute_step)
+
+
+def process_mute_step(message):
+    if handle_cancellation(message, "Отмена выдачи мута."):
+        return
+    parts = message.text.strip().split(maxsplit=1)
+    target = parts[0]
+    duration = parts[1] if len(parts) > 1 else None
+    success, reply_text = mute_user(target, duration)
+    if success:
+        try:
+            log_admin_action(message.chat.id, "мут", f"Пользователь: {target}, длительность: {duration or 'навсегда'}")
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, reply_text, reply_markup=admin_keyboard)
+
+
+@bot.message_handler(func=lambda message: message.text == '🔊 Снять мут' and is_admin(message.chat.id))
+def request_unmute_button(message):
+    active_mutes = {}
+    for uid in list(muted_users.keys()):
+        if is_muted(uid):
+            active_mutes[uid] = muted_users[uid]
+
+    if not active_mutes:
+        bot.send_message(message.chat.id, "ℹ️ Пользователей с активным мутом нет.", reply_markup=admin_keyboard)
+        return
+
+    mutes_text = "🔇 Пользователи с мутом:\n"
+    for uid in list(active_mutes.keys())[:20]:
+        uname = user_names_data.get(str(uid), "")
+        info = get_mute_info(uid)
+        mutes_text += f"• ID: {uid} ({uname}) — {info}\n"
+    mutes_text += "\nВведите ID или @username для снятия мута. Или нажмите 'Отмена'."
+    msg = bot.send_message(message.chat.id, mutes_text, reply_markup=cancel_keyboard)
+    bot.register_next_step_handler(msg, process_unmute_step)
+
+
+def process_unmute_step(message):
+    if handle_cancellation(message, "Отмена снятия мута."):
+        return
+    target = message.text.strip()
+    success, reply_text = unmute_user(target)
+    if success:
+        try:
+            log_admin_action(message.chat.id, "размут", f"Пользователь: {target}")
+        except Exception:
+            pass
+    bot.send_message(message.chat.id, reply_text, reply_markup=admin_keyboard)
 
 
 @bot.message_handler(func=lambda message: message.text == '📢 Рассылка' and is_admin(message.chat.id))
@@ -848,33 +1258,49 @@ def process_broadcast(message):
 
         success_count = 0
         total_users = len(user_ids)
+        dead_users = set()
 
         # Отправляем сообщение о начале рассылки
         bot.send_message(message.chat.id, f"🚀 Начинаю рассылку для {total_users} пользователей...",
                          reply_markup=admin_keyboard)
 
         # Подготовка медиа для отправки
-        if message.photo:
-            # Рассылка фото с подписью
-            photo_id = message.photo[-1].file_id
-            caption = message.caption if message.caption else ""
+        is_photo = bool(message.photo)
+        photo_id = message.photo[-1].file_id if is_photo else None
+        caption = (message.caption if message.caption else "") if is_photo else None
+        text = message.text if not is_photo else None
 
-            for user_id in list(user_ids):
-                try:
+        for user_id in list(user_ids):
+            try:
+                if is_photo:
                     bot.send_photo(user_id, photo_id, caption=caption)
-                    success_count += 1
-                except Exception as e:
-                    print(f"Ошибка рассылки фото пользователю {user_id}: {e}")
-        else:
-            # Рассылка текста
-            text = message.text
-
-            for user_id in list(user_ids):
-                try:
+                else:
                     bot.send_message(user_id, text)
-                    success_count += 1
-                except Exception as e:
+                success_count += 1
+                time.sleep(0.04)  # Ограничение частоты запросов к Telegram API (~25 сообщ./сек)
+            except apihelper.ApiTelegramException as e:
+                if e.error_code == 429:
+                    retry_after = e.result_json.get('parameters', {}).get('retry_after', 2)
+                    time.sleep(retry_after)
+                    try:
+                        if is_photo:
+                            bot.send_photo(user_id, photo_id, caption=caption)
+                        else:
+                            bot.send_message(user_id, text)
+                        success_count += 1
+                    except Exception:
+                        pass
+                elif e.error_code in (403, 400) and any(err in str(e).lower() for err in ["blocked", "deactivated", "chat not found"]):
+                    dead_users.add(user_id)
+                else:
                     print(f"Ошибка рассылки пользователю {user_id}: {e}")
+            except Exception as e:
+                print(f"Ошибка рассылки пользователю {user_id}: {e}")
+
+        if dead_users:
+            user_ids.difference_update(dead_users)
+            save_users()
+            print(f"Рассылка: удалено {len(dead_users)} неактивных пользователей.")
 
         bot.send_message(message.chat.id,
                          f"✅ Рассылка завершена!\n📊 Результат: {success_count}/{total_users}",
@@ -915,6 +1341,8 @@ def process_new_schedule(message, file_path, schedule_type):
             downloaded_file = bot.download_file(file_info.file_path)
             with open(file_path, 'wb') as f:
                 f.write(downloaded_file)
+            # Архивация в отдельную папку
+            archive_schedule(file_path, schedule_type)
             schedule_file_ids[schedule_type] = None
             save_schedule_file_ids()
             if schedule_type == "от учащихся":
@@ -1167,8 +1595,7 @@ def process_admin_reply(message):
         for msg in messages:
             if msg['user_id'] == target_user_id:
                 msg['replied'] = True
-        with open(messages_file, 'w', encoding='utf-8') as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
+        atomic_save_json(messages_file, messages)
 
         bot.send_message(admin_id, "✅ Ответ успешно отправлен!", reply_markup=admin_keyboard)
         try:
@@ -1200,6 +1627,95 @@ def back_to_main(message):
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=get_main_keyboard(message.chat.id))
 
 
+def get_archived_items():
+    """Возвращает список папок архива, отсортированных от новых к старым."""
+    if not os.path.exists(ARCHIVE_FOLDER):
+        return []
+    items = []
+    for entry in os.listdir(ARCHIVE_FOLDER):
+        full_path = os.path.join(ARCHIVE_FOLDER, entry)
+        if os.path.isdir(full_path):
+            files = [f for f in os.listdir(full_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            if files:
+                items.append((entry, os.path.join(full_path, files[0])))
+    items.sort(key=lambda x: x[0], reverse=True)
+    return items
+
+
+def show_archive_page(chat_id, page=0, message_id=None):
+    items = get_archived_items()
+    if not items:
+        bot.send_message(chat_id, "📭 В архиве пока нет сохраненных расписаний.", reply_markup=files_keyboard)
+        return
+
+    PAGE_SIZE = 5
+    total_pages = (len(items) + PAGE_SIZE - 1) // PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start_idx = page * PAGE_SIZE
+    page_items = items[start_idx:start_idx + PAGE_SIZE]
+
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    for entry_name, _ in page_items:
+        display_label = entry_name.replace("_", " ")
+        item_index = items.index((entry_name, _))
+        keyboard.add(telebot.types.InlineKeyboardButton(
+            text=f"📷 {display_label}",
+            callback_data=f"arch_get:{item_index}"
+        ))
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data=f"arch_pg:{page - 1}"))
+    nav_buttons.append(telebot.types.InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="arch_noop"))
+    if page < total_pages - 1:
+        nav_buttons.append(telebot.types.InlineKeyboardButton("Вперед ➡️", callback_data=f"arch_pg:{page + 1}"))
+
+    if len(nav_buttons) > 1:
+        keyboard.row(*nav_buttons)
+
+    text = f"📦 Архив расписаний (Страница {page + 1} из {total_pages}):\nНажмите на расписание, чтобы получить скриншот:"
+
+    if message_id:
+        try:
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=keyboard)
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, text, reply_markup=keyboard)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('arch_get:', 'arch_pg:', 'arch_noop')))
+def handle_archive_callbacks(call):
+    if not is_admin(call.message.chat.id):
+        bot.answer_callback_query(call.id, "❌ Доступ только для администраторов.", show_alert=True)
+        return
+
+    if call.data == "arch_noop":
+        bot.answer_callback_query(call.id)
+        return
+
+    if call.data.startswith("arch_pg:"):
+        page = int(call.data.split(":")[1])
+        bot.answer_callback_query(call.id)
+        show_archive_page(call.message.chat.id, page=page, message_id=call.message.message_id)
+        return
+
+    if call.data.startswith("arch_get:"):
+        idx = int(call.data.split(":")[1])
+        items = get_archived_items()
+        if 0 <= idx < len(items):
+            entry_name, file_path = items[idx]
+            bot.answer_callback_query(call.id, "Отправляю скриншот...")
+            if os.path.exists(file_path):
+                caption = f"📦 Расписание из архива:\n📅 {entry_name.replace('_', ' ')}"
+                with open(file_path, 'rb') as photo:
+                    bot.send_photo(call.message.chat.id, photo, caption=caption)
+            else:
+                bot.send_message(call.message.chat.id, f"❌ Файл {file_path} не найден на сервере.")
+        else:
+            bot.answer_callback_query(call.id, "Расписание не найдено.", show_alert=True)
+
+
 @bot.message_handler(content_types=['text'])
 def handle_text_messages(message):
     update_user_name_info(message.from_user)
@@ -1208,95 +1724,60 @@ def handle_text_messages(message):
         process_admin_chat_message(message)
         return
 
-
-    if message.text == '📊 Аудит' and is_admin(message.chat.id):
-        events = get_recent_audit_events(20)
-        if not events:
-            bot.send_message(message.chat.id, "📭 Аудит пока пуст.", reply_markup=admin_keyboard)
-            return
-        formatted = "📊 Последние действия админов:\n\n"
-        for ev in events[-20:]:
-            uname = ev.get('admin_username') or ""
-            formatted += (f"🕒 {ev.get('timestamp')} | {uname} ({ev.get('admin_id')})\n"
-                          f"➡️ {ev.get('action')}\n{ev.get('details')}\n" + "─" * 20 + "\n")
-        bot.send_message(message.chat.id, formatted)
-        audit_options = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-        audit_options.row('📁 ЭКСПОРТ АУДИТА', '🔙 Главное меню')
-        bot.send_message(message.chat.id, "Доступные действия:", reply_markup=audit_options)
-
-    if message.text == '📁 ЭКСПОРТ АУДИТА' and is_admin(message.chat.id):
-        if os.path.exists(AUDIT_FILE):
-            try:
-                with open(AUDIT_FILE, 'rb') as f:
-                    bot.send_document(message.chat.id, f, reply_markup=admin_keyboard)
-                try:
-                    log_admin_action(message.chat.id, "экспорт аудита", "Отправлен файл audit_log.json")
-                except Exception:
-                    pass
-            except Exception as e:
-                bot.send_message(message.chat.id, f"❌ Ошибка отправки файла: {e}", reply_markup=admin_keyboard)
-        else:
-            bot.send_message(message.chat.id, "❌ Файл аудита не найден.", reply_markup=admin_keyboard)
-
     if message.text == '📁 Файлы' and is_admin(message.chat.id):
-        if str(message.chat.id) != SUPER_ADMIN_ID:
-            bot.send_message(message.chat.id, "❌ Доступ к файловому меню только у главного администратора.",
-                             reply_markup=admin_keyboard)
-            return
-        files_menu = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-        files_menu.row('📄 audit_log.json', '👥 user_names.json')
-        files_menu.row('📋 admins.json', '🔙 Главное меню')
-        bot.send_message(message.chat.id, "Выберите файл для отправки:", reply_markup=files_menu)
+        text = (
+            "📁 Меню файлов и архива\n\n"
+            "Выберите файл для скачивания или откройте архив старых расписаний:"
+        )
+        bot.send_message(message.chat.id, text, reply_markup=files_keyboard)
+        return
 
-    if message.text == '📄 audit_log.json' and str(message.chat.id) == SUPER_ADMIN_ID:
-        if os.path.exists(AUDIT_FILE):
+    if message.text == '📦 Архив расписаний' and is_admin(message.chat.id):
+        show_archive_page(message.chat.id, page=0)
+        return
+
+    FILE_TARGETS = {
+        '📄 audit_log.json': (AUDIT_FILE, "audit_log.json"),
+        '👥 user_names.json': (USER_NAMES_FILE, "user_names.json"),
+        '📋 admins.json': (ADMIN_FILE, "admins.json"),
+        '👥 users.txt': (os.path.join(DATA_FOLDER, "users.txt"), "users.txt"),
+        '🚫 banned_users.json': (BANNED_USERS_FILE, "banned_users.json"),
+        '🔇 muted_users.json': (MUTED_USERS_FILE, "muted_users.json"),
+    }
+
+    if message.text in FILE_TARGETS and is_admin(message.chat.id):
+        file_path, file_name = FILE_TARGETS[message.text]
+        if os.path.exists(file_path):
             try:
-                with open(AUDIT_FILE, 'rb') as f:
-                    bot.send_document(message.chat.id, f, reply_markup=admin_keyboard)
+                with open(file_path, 'rb') as f:
+                    bot.send_document(message.chat.id, f, reply_markup=files_keyboard)
                 try:
-                    log_admin_action(message.chat.id, "скачать файл", "audit_log.json")
+                    log_admin_action(message.chat.id, "скачать файл", file_name)
                 except Exception:
                     pass
             except Exception as e:
-                bot.send_message(message.chat.id, f"❌ Ошибка отправки: {e}", reply_markup=admin_keyboard)
+                bot.send_message(message.chat.id, f"❌ Ошибка отправки: {e}", reply_markup=files_keyboard)
         else:
-            bot.send_message(message.chat.id, "❌ Файл audit_log.json не найден.", reply_markup=admin_keyboard)
-
-    if message.text == '👥 user_names.json' and str(message.chat.id) == SUPER_ADMIN_ID:
-        if os.path.exists(USER_NAMES_FILE):
-            try:
-                with open(USER_NAMES_FILE, 'rb') as f:
-                    bot.send_document(message.chat.id, f, reply_markup=admin_keyboard)
-                try:
-                    log_admin_action(message.chat.id, "скачать файл", "user_names.json")
-                except Exception:
-                    pass
-            except Exception as e:
-                bot.send_message(message.chat.id, f"❌ Ошибка отправки: {e}", reply_markup=admin_keyboard)
-        else:
-            bot.send_message(message.chat.id, "❌ Файл user_names.json не найден.", reply_markup=admin_keyboard)
-
-    if message.text == '📋 admins.json' and str(message.chat.id) == SUPER_ADMIN_ID:
-        if os.path.exists(ADMIN_FILE):
-            try:
-                with open(ADMIN_FILE, 'rb') as f:
-                    bot.send_document(message.chat.id, f, reply_markup=admin_keyboard)
-                try:
-                    log_admin_action(message.chat.id, "скачать файл", "admins.json")
-                except Exception:
-                    pass
-            except Exception as e:
-                bot.send_message(message.chat.id, f"❌ Ошибка отправки: {e}", reply_markup=admin_keyboard)
+            bot.send_message(message.chat.id, f"❌ Файл {file_name} еще не создан на сервере.", reply_markup=files_keyboard)
+        return
 
 
 def save_users():
-    try:
-        users_file = os.path.join(DATA_FOLDER, "users.txt")
-        with open(users_file, 'w', encoding='utf-8') as f:
-            for user_id in user_ids:
-                f.write(f"{user_id}\n")
-    except Exception as e:
-        print(f"Ошибка сохранения пользователей: {e}")
+    users_file = os.path.join(DATA_FOLDER, "users.txt")
+    temp_file = f"{users_file}.tmp"
+    with file_io_lock:
+        try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                for user_id in user_ids:
+                    f.write(f"{user_id}\n")
+            os.replace(temp_file, users_file)
+        except Exception as e:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
+            print(f"Ошибка сохранения пользователей: {e}")
 
 
 def load_users():
@@ -1326,9 +1807,11 @@ def main():
     load_last_hashes()
     load_schedule_file_ids()
     load_user_names()
+    load_last_message_times()
     load_audit_log()
-    check_schedule_updates()
     load_banned_users()
+    load_muted_users()
+    check_schedule_updates()
     global is_first_check
     is_first_check = False
     scheduler_thread = threading.Thread(target=schedule_checker, daemon=True)
