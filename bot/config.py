@@ -73,6 +73,7 @@ MESSAGES_FILE = os.path.join(DATA_DIR, "user_messages.json")
 LAST_MESSAGE_TIME_FILE = os.path.join(DATA_DIR, "last_message_time.json")
 AUDIT_FILE = os.path.join(DATA_DIR, "audit_log.json")
 SCHEDULE_FILE_IDS_FILE = os.path.join(DATA_DIR, "schedule_file_ids.json")
+CASINO_FILE = os.path.join(DATA_DIR, "casino.json")
 
 # Пути к изображениям расписаний
 SCHEDULE_STUDENTS_FILE = os.path.join(DATA_DIR, "last_schedule.jpg")

@@ -7,6 +7,7 @@ from bot.handlers.feedback import router as feedback_router
 from bot.handlers.donation import router as donation_router
 from bot.handlers.admin import router as admin_router
 from bot.handlers.inline_query import router as inline_query_router
+from bot.handlers.casino import router as casino_router
 
 
 def setup_routers() -> Router:
@@ -25,7 +26,9 @@ def setup_routers() -> Router:
     main_router.include_router(inline_query_router)
     # 5. Донаты
     main_router.include_router(donation_router)
-    # 6. Общие команды (/start, /help, отмена)
+    # 6. Секретные пасхалки
+    main_router.include_router(casino_router)
+    # 7. Общие команды (/start, /help, отмена)
     main_router.include_router(common_router)
 
     return main_router
