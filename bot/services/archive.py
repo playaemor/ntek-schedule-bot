@@ -12,6 +12,8 @@ def get_archived_items() -> List[Tuple[str, str]]:
 
     items = []
     for entry in os.listdir(ARCHIVE_DIR):
+        if entry.endswith("_звонков"):
+            continue
         full_dir = os.path.join(ARCHIVE_DIR, entry)
         if os.path.isdir(full_dir):
             files = [f for f in os.listdir(full_dir) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
@@ -23,7 +25,9 @@ def get_archived_items() -> List[Tuple[str, str]]:
 
 
 def archive_schedule(source_file: str, schedule_type: str) -> str:
-    """Архивирует файл расписания с текущей временной меткой."""
+    """Архивирует файл расписания с текущей временной меткой (кроме звонков)."""
+    if schedule_type == "звонков":
+        return ""
     try:
         now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         target_dir = os.path.join(ARCHIVE_DIR, f"{now_str}_{schedule_type}")

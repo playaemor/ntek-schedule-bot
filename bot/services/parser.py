@@ -147,12 +147,6 @@ async def check_schedule_updates(bot: Bot) -> bool:
                 or soup.find("a", string=re.compile(r"Расписание для преподавателей", re.IGNORECASE))
             )
 
-            link_bells = (
-                soup.find("a", href=re.compile(r"zvonki.*\.jpe?g", re.IGNORECASE))
-                or soup.find(lambda t: t.name == "a" and "звонк" in t.get_text().lower())
-                or soup.find("a", string=re.compile(r"звонк", re.IGNORECASE))
-            )
-
             if link_students and link_students.get("href"):
                 url = urljoin(NTЕK_SCHEDULE_URL, link_students["href"])
                 temp_file = os.path.join(os.path.dirname(SCHEDULE_STUDENTS_FILE), "temp_students.jpg")
@@ -166,13 +160,6 @@ async def check_schedule_updates(bot: Bot) -> bool:
                 if await download_and_check_update(session, url, temp_file, SCHEDULE_TEACHERS_FILE, "преподавателей"):
                     if not is_first_check:
                         updates.append("для преподавателей")
-
-            if link_bells and link_bells.get("href"):
-                url = urljoin(NTЕK_SCHEDULE_URL, link_bells["href"])
-                temp_file = os.path.join(os.path.dirname(SCHEDULE_BELLS_FILE), "temp_bells.jpg")
-                if await download_and_check_update(session, url, temp_file, SCHEDULE_BELLS_FILE, "звонков"):
-                    if not is_first_check:
-                        updates.append("звонков")
 
         # Проверяем, чтобы для всех актуальных файлов расписаний были закэшированы file_id
         await ensure_schedule_cache(bot)

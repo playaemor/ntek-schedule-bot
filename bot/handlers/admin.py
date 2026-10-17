@@ -255,7 +255,6 @@ async def process_update_bells(message: Message, state: FSMContext) -> None:
         file_info = await message.bot.get_file(photo.file_id)
         await message.bot.download_file(file_info.file_path, destination=SCHEDULE_BELLS_FILE)
 
-        archive_schedule(SCHEDULE_BELLS_FILE, "звонков")
         file_hash = storage.calculate_file_hash(SCHEDULE_BELLS_FILE)
         storage.set_schedule_file_id("звонков", photo.file_id, file_hash)
 
