@@ -1,5 +1,5 @@
-# Конфигурация
-config.py
+# Конфигурация (только корневой файл с секретами)
+/config.py
 *.env
 .env.local
 secrets.json
