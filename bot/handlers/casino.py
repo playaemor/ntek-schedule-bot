@@ -87,11 +87,11 @@ def get_casino_keyboard(balance: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎰 ALL-IN (Вся стипуха)", callback_data="cas:spin:allin"),
         ],
         [
-            InlineKeyboardButton(text=f"🎲 Кости с завхозом ({DEFAULT_BET} к.)", callback_data=f"cas:dice:{DEFAULT_BET}"),
-            InlineKeyboardButton(text=f"🎯 Дартс в деканат ({DEFAULT_BET} к.)", callback_data=f"cas:darts:{DEFAULT_BET}"),
+            InlineKeyboardButton(text=f"🎲 Кости с куратором ({DEFAULT_BET} к.)", callback_data=f"cas:dice:{DEFAULT_BET}"),
+            InlineKeyboardButton(text=f"🎯 Дартс в ПО-41 ({DEFAULT_BET} к.)", callback_data=f"cas:darts:{DEFAULT_BET}"),
         ],
         [
-            InlineKeyboardButton(text="💸 Займ у куратора (+100)", callback_data="cas:loan"),
+            InlineKeyboardButton(text="💸 Займ у преподавателя (+100)", callback_data="cas:loan"),
             InlineKeyboardButton(text="🔄 Обновить", callback_data="cas:refresh"),
         ],
         [
@@ -168,7 +168,7 @@ async def handle_loan(call: CallbackQuery) -> None:
 
     if bal >= 50:
         await call.answer(
-            f"Куратор говорит: 'У тебя ещё есть {bal} коинов! Иди на пары, никакого займа!'",
+            f"Преподаватель говорит: 'У тебя ещё есть {bal} коинов! Иди на пары, никакого займа!'",
             show_alert=True,
         )
         return
@@ -177,7 +177,7 @@ async def handle_loan(call: CallbackQuery) -> None:
     if elapsed < LOAN_COOLDOWN:
         remaining_min = int((LOAN_COOLDOWN - elapsed) // 60) + 1
         await call.answer(
-            f"Куратор ещё отходит от прошлого раза. Зайди через {remaining_min} мин.",
+            f"Преподаватель ещё отходит от прошлой пары. Зайди через {remaining_min} мин.",
             show_alert=True,
         )
         return
@@ -185,7 +185,7 @@ async def handle_loan(call: CallbackQuery) -> None:
     new_bal = bal + LOAN_AMOUNT
     update_user_profile(uid, balance=new_bal, last_loan_time=now)
     await call.answer(
-        f"🤝 Куратор вздохнул и выдал тебе {LOAN_AMOUNT} коинов под честное слово сдать сессию!",
+        f"🤝 Преподаватель вздохнул и выдал тебе {LOAN_AMOUNT} коинов под честное слово сдать сессию!",
         show_alert=True,
     )
     profile = get_user_profile(uid)
@@ -210,10 +210,10 @@ async def handle_slots(call: CallbackQuery) -> None:
 
     bet = bal if bet_type == "allin" else DEFAULT_BET
     if bet <= 0:
-        await call.answer("Ты на мели! Возьми займ у куратора.", show_alert=True)
+        await call.answer("Ты на мели! Возьми займ у преподавателя.", show_alert=True)
         return
     if bal < bet:
-        await call.answer(f"Недостаточно коинов (нужно {bet}, а у тебя {bal})! Возьми займ.", show_alert=True)
+        await call.answer(f"Недостаточно коинов (нужно {bet}, а у тебя {bal})! Возьми займ у преподавателя.", show_alert=True)
         return
 
     active_games[uid] = True
@@ -323,7 +323,7 @@ async def handle_dice(call: CallbackQuery) -> None:
     bet = DEFAULT_BET
 
     if bal < bet:
-        await call.answer("Недостаточно коинов на ставку! Возьми займ у куратора.", show_alert=True)
+        await call.answer("Недостаточно коинов на ставку! Возьми займ у преподавателя.", show_alert=True)
         return
 
     active_games[uid] = True
@@ -337,7 +337,7 @@ async def handle_dice(call: CallbackQuery) -> None:
     bot = call.bot
     chat_id = call.message.chat.id
 
-    await bot.send_message(chat_id=chat_id, text="🧔‍♂️ <b>Завхоз Михалыч</b> бросает кость...")
+    await bot.send_message(chat_id=chat_id, text="👩‍🏫 <b>Куратор</b> бросает кость...")
     dice_bot = await bot.send_dice(chat_id=chat_id, emoji="🎲")
     bot_val = dice_bot.dice.value
 
@@ -352,13 +352,13 @@ async def handle_dice(call: CallbackQuery) -> None:
     win = 0
     if user_val > bot_val:
         win = bet * 2
-        title = f"🎉 <b>Ты обыграл завхоза!</b> ({user_val} против {bot_val})\nМихалыч недовольно скрипит ключами."
+        title = f"🎉 <b>Ты обыграл куратора!</b> ({user_val} против {bot_val})\nКуратор в шоке обещает автомат за семестр."
         profile["wins"] = profile.get("wins", 0) + 1
     elif user_val == bot_val:
         win = bet
-        title = f"🤝 <b>Ничья!</b> ({user_val}:{bot_val})\nМихалыч вернул ставку со словами 'Живи пока'."
+        title = f"🤝 <b>Ничья!</b> ({user_val}:{bot_val})\nКуратор вернул ставку: 'На пересдаче так легко не отделаешься'."
     else:
-        title = f"🤦‍♂️ <b>Завхоз победил!</b> ({bot_val} против {user_val})\nКоины пошли на покупку новых швабр."
+        title = f"🤦‍♂️ <b>Куратор победил!</b> ({bot_val} против {user_val})\nКоины пошли на покупку бумаги для отчётов."
 
     bal += win
     profile["balance"] = bal
@@ -382,7 +382,7 @@ async def handle_dice(call: CallbackQuery) -> None:
     await bot.send_message(chat_id=chat_id, text=res_text, reply_markup=action_kb)
 
 
-# --- Игра 3: Дартс в деканат (🎯) ---
+# --- Игра 3: Дартс в ПО-41 (🎯) ---
 
 @router.callback_query(F.data.startswith("cas:darts:"))
 async def handle_darts(call: CallbackQuery) -> None:
@@ -396,7 +396,7 @@ async def handle_darts(call: CallbackQuery) -> None:
     bet = DEFAULT_BET
 
     if bal < bet:
-        await call.answer("Недостаточно коинов на ставку! Возьми займ у куратора.", show_alert=True)
+        await call.answer("Недостаточно коинов на ставку! Возьми займ у преподавателя.", show_alert=True)
         return
 
     active_games[uid] = True
@@ -410,7 +410,7 @@ async def handle_darts(call: CallbackQuery) -> None:
     bot = call.bot
     chat_id = call.message.chat.id
 
-    await bot.send_message(chat_id=chat_id, text="🎯 <i>Прицеливаешься в расписание на стене деканата...</i>")
+    await bot.send_message(chat_id=chat_id, text="🎯 <i>Прицеливаешься в расписание группы ПО-41...</i>")
     dart_msg = await bot.send_dice(chat_id=chat_id, emoji="🎯")
     val = dart_msg.dice.value
 
@@ -419,7 +419,7 @@ async def handle_darts(call: CallbackQuery) -> None:
     win = 0
     if val == 6:  # Bullseye (центр)
         win = bet * 3
-        title = "🎯 <b>В ЯБЛОЧКО!</b>\nПрямо в центр! Декан аплодирует стоя!"
+        title = "🎯 <b>В ЯБЛОЧКО!</b>\nПрямо в центр! Группа ПО-41 аплодирует стоя!"
         profile["wins"] = profile.get("wins", 0) + 1
     elif val == 5:  # Красное внутреннее кольцо
         win = int(bet * 1.5)
