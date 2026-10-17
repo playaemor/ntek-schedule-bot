@@ -24,6 +24,7 @@ from bot.config import (
 )
 from bot import storage
 from bot.services.archive import archive_schedule
+from bot.services.parser import check_schedule_updates
 from bot.keyboards import (
     get_main_keyboard,
     get_admin_keyboard,
@@ -86,6 +87,15 @@ async def handle_stats(message: Message) -> None:
     messages = storage.load_messages()
     unanswered = sum(1 for m in messages if not m.get("replied", False))
 
+    def file_status(path: str, stype: str) -> str:
+        if not os.path.exists(path):
+            return "❌ отсутствует"
+        mtime = time.strftime("%d.%m %H:%M", time.localtime(os.path.getmtime(path)))
+        curr_h = storage.calculate_file_hash(path)
+        is_cached = bool(storage.get_schedule_file_id(stype, expected_hash=curr_h))
+        cache_str = " (кэш ✅)" if is_cached else " (кэш ⏳)"
+        return f"✅ от {mtime}{cache_str}"
+
     stats_text = (
         "📊 <b>Статистика бота</b>\n\n"
         f"• 👥 Пользователей в базе: <b>{len(storage.user_ids)}</b>\n"
@@ -95,13 +105,30 @@ async def handle_stats(message: Message) -> None:
         f"• 🔇 В муте: <b>{len(storage.muted_users)}</b>\n"
         f"• 📨 Всего обращений: <b>{len(messages)}</b>\n"
         f"• ❓ Неотвеченных обращений: <b>{unanswered}</b>\n\n"
-        "<b>Наличие файлов расписаний:</b>\n"
-        f"• 📅 Учащихся: {'✅' if os.path.exists(SCHEDULE_STUDENTS_FILE) else '❌'}\n"
-        f"• 👨‍🏫 Преподавателей: {'✅' if os.path.exists(SCHEDULE_TEACHERS_FILE) else '❌'}\n"
-        f"• 🔔 Звонков: {'✅' if os.path.exists(SCHEDULE_BELLS_FILE) else '❌'}\n"
-        f"• 📝 От учащихся: {'✅' if os.path.exists(SCHEDULE_STUDENT_MADE_FILE) else '❌'}"
+        "<b>Файлы расписаний на сервере:</b>\n"
+        f"• 📅 Учащихся: {file_status(SCHEDULE_STUDENTS_FILE, 'учащихся')}\n"
+        f"• 👨‍🏫 Преподавателей: {file_status(SCHEDULE_TEACHERS_FILE, 'преподавателей')}\n"
+        f"• 🔔 Звонков: {file_status(SCHEDULE_BELLS_FILE, 'звонков')}\n"
+        f"• 📝 От учащихся: {file_status(SCHEDULE_STUDENT_MADE_FILE, 'от учащихся')}"
     )
     await message.answer(stats_text)
+
+
+@router.message(Command("check_site"))
+@router.message(F.text == "🔄 Проверить сайт")
+async def handle_check_site(message: Message) -> None:
+    if not storage.is_admin(message.from_user.id):
+        return
+
+    status_msg = await message.answer("🔍 Проверяю сайт НТЭК на наличие свежих расписаний...")
+    try:
+        updated = await check_schedule_updates(message.bot)
+        if updated:
+            await status_msg.edit_text("✅ Проверка завершена: найдено и загружено новое расписание с сайта!")
+        else:
+            await status_msg.edit_text("ℹ️ Проверка завершена: расписание на сайте совпадает с текущим.")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка проверки сайта: {e}")
 
 
 # --- Рассылка сообщений ---
@@ -229,7 +256,8 @@ async def process_update_bells(message: Message, state: FSMContext) -> None:
         await message.bot.download_file(file_info.file_path, destination=SCHEDULE_BELLS_FILE)
 
         archive_schedule(SCHEDULE_BELLS_FILE, "звонков")
-        storage.set_schedule_file_id("звонков", photo.file_id)
+        file_hash = storage.calculate_file_hash(SCHEDULE_BELLS_FILE)
+        storage.set_schedule_file_id("звонков", photo.file_id, file_hash)
 
         admin_username = f"@{message.from_user.username}" if message.from_user.username else ""
         storage.log_admin_action(message.from_user.id, "обновление звонков", "Загружен новый файл", admin_username)
@@ -269,8 +297,9 @@ async def process_update_student_schedule(message: Message, state: FSMContext) -
         await message.bot.download_file(file_info.file_path, destination=SCHEDULE_STUDENT_MADE_FILE)
 
         archive_schedule(SCHEDULE_STUDENT_MADE_FILE, "от учащихся")
-        storage.last_hashes["от учащихся"] = storage.calculate_file_hash(SCHEDULE_STUDENT_MADE_FILE)
-        storage.set_schedule_file_id("от учащихся", photo.file_id)
+        file_hash = storage.calculate_file_hash(SCHEDULE_STUDENT_MADE_FILE)
+        storage.last_hashes["от учащихся"] = file_hash
+        storage.set_schedule_file_id("от учащихся", photo.file_id, file_hash)
 
         admin_username = f"@{message.from_user.username}" if message.from_user.username else ""
         storage.log_admin_action(message.from_user.id, "обновление расписания от учащихся", "Загружен новый файл", admin_username)

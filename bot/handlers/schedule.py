@@ -67,9 +67,10 @@ async def deliver_schedule(event: Union[Message, CallbackQuery], schedule_type: 
         return
 
     bot = event.bot
-    file_id = storage.schedule_file_ids.get(schedule_type)
+    current_hash = storage.calculate_file_hash(file_path)
+    file_id = storage.get_schedule_file_id(schedule_type, expected_hash=current_hash)
 
-    # 1. Попытка отправить через сохраненный file_id (мгновенно, без повторной загрузки)
+    # 1. Попытка отправить через сохраненный file_id (только если хэш совпадает с файлом на диске)
     if file_id:
         try:
             await bot.send_photo(
@@ -82,8 +83,8 @@ async def deliver_schedule(event: Union[Message, CallbackQuery], schedule_type: 
                 await event.answer()
             return
         except Exception:
-            # File ID устарел или сброшен
-            storage.set_schedule_file_id(schedule_type, None)
+            # File ID устарел или отклонен сервером Telegram
+            storage.invalidate_schedule_cache(schedule_type)
 
     # 2. Отправка напрямую из локального файла
     try:
@@ -96,7 +97,7 @@ async def deliver_schedule(event: Union[Message, CallbackQuery], schedule_type: 
         )
         if msg.photo:
             new_file_id = msg.photo[-1].file_id
-            storage.set_schedule_file_id(schedule_type, new_file_id)
+            storage.set_schedule_file_id(schedule_type, new_file_id, current_hash)
 
         if isinstance(event, CallbackQuery):
             await event.answer()

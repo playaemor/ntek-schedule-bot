@@ -62,7 +62,7 @@ async def download_and_check_update(
             archive_schedule(target_file, schedule_type)
 
             storage.last_hashes[schedule_type] = current_hash
-            storage.set_schedule_file_id(schedule_type, None)
+            storage.invalidate_schedule_cache(schedule_type)
             return True
         else:
             if os.path.exists(temp_file):
@@ -134,11 +134,24 @@ async def check_schedule_updates(bot: Bot) -> bool:
 
             soup = BeautifulSoup(html, "html.parser")
 
-            # Поиск ссылок на расписания
-            link_students = soup.find("a", string=re.compile(r"Расписание для учащихся", re.IGNORECASE))
-            link_teachers = soup.find("a", string=re.compile(r"Расписание для преподавателей", re.IGNORECASE))
+            # Поиск ссылок на расписания с приоритетом по шаблону имени файла (href regex) и поиском по тексту
+            link_students = (
+                soup.find("a", href=re.compile(r"s_\d+.*\.jpe?g", re.IGNORECASE))
+                or soup.find(lambda t: t.name == "a" and "учащ" in t.get_text().lower())
+                or soup.find("a", string=re.compile(r"Расписание для учащихся", re.IGNORECASE))
+            )
 
-            link_bells = soup.find("a", href=re.compile(r"zvonki", re.IGNORECASE)) or soup.find("a", string=re.compile(r"звонк", re.IGNORECASE))
+            link_teachers = (
+                soup.find("a", href=re.compile(r"t_\d+.*\.jpe?g", re.IGNORECASE))
+                or soup.find(lambda t: t.name == "a" and "препод" in t.get_text().lower())
+                or soup.find("a", string=re.compile(r"Расписание для преподавателей", re.IGNORECASE))
+            )
+
+            link_bells = (
+                soup.find("a", href=re.compile(r"zvonki.*\.jpe?g", re.IGNORECASE))
+                or soup.find(lambda t: t.name == "a" and "звонк" in t.get_text().lower())
+                or soup.find("a", string=re.compile(r"звонк", re.IGNORECASE))
+            )
 
             if link_students and link_students.get("href"):
                 url = urljoin(NTЕK_SCHEDULE_URL, link_students["href"])
@@ -161,7 +174,7 @@ async def check_schedule_updates(bot: Bot) -> bool:
                     if not is_first_check:
                         updates.append("звонков")
 
-        # Проверяем, чтобы для всех файлов расписаний были закэшированы file_id
+        # Проверяем, чтобы для всех актуальных файлов расписаний были закэшированы file_id
         await ensure_schedule_cache(bot)
 
         if updates and not is_first_check:
@@ -178,7 +191,7 @@ async def check_schedule_updates(bot: Bot) -> bool:
 
 
 async def ensure_schedule_cache(bot: Bot) -> None:
-    """Гарантирует наличие file_id для всех файлов расписаний для моментальной отправки в Inline."""
+    """Гарантирует наличие валидного file_id для всех файлов расписаний для моментальной отправки в Inline."""
     targets = [
         ("учащихся", SCHEDULE_STUDENTS_FILE),
         ("преподавателей", SCHEDULE_TEACHERS_FILE),
@@ -197,11 +210,15 @@ async def ensure_schedule_cache(bot: Bot) -> None:
         return
 
     for stype, path in targets:
-        if os.path.exists(path) and not storage.schedule_file_ids.get(stype):
+        if not os.path.exists(path):
+            continue
+        current_hash = storage.calculate_file_hash(path)
+        cached_id = storage.get_schedule_file_id(stype, expected_hash=current_hash)
+        if not cached_id:
             try:
                 msg = await bot.send_photo(chat_id, FSInputFile(path), disable_notification=True)
                 if msg.photo:
-                    storage.set_schedule_file_id(stype, msg.photo[-1].file_id)
+                    storage.set_schedule_file_id(stype, msg.photo[-1].file_id, current_hash)
             except Exception:
                 # Если пользователь/админ еще не нажал /start в этом боте — кэш обновится при первом запросе
                 pass

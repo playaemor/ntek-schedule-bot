@@ -39,7 +39,10 @@ def get_admin_keyboard(is_super_admin: bool = False) -> ReplyKeyboardMarkup:
             KeyboardButton(text="📢 Рассылка"),
         ],
         [
+            KeyboardButton(text="🔄 Проверить сайт"),
             KeyboardButton(text="🔄 Обновить звонки"),
+        ],
+        [
             KeyboardButton(text="🔄 Расписание от учащихся"),
         ],
         [

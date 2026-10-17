@@ -1,3 +1,4 @@
+import os
 from typing import List
 from aiogram import Router
 from aiogram.types import (
@@ -8,6 +9,7 @@ from aiogram.types import (
 )
 
 from bot import storage
+from bot.handlers.schedule import SCHEDULE_CONFIG
 
 router = Router(name="inline_query_router")
 
@@ -66,9 +68,12 @@ async def handle_inline_query(inline_query: InlineQuery) -> None:
             if not (matches_title or matches_desc or matches_kw):
                 continue
 
-        file_id = storage.schedule_file_ids.get(item["key"])
+        cfg = SCHEDULE_CONFIG.get(item["key"])
+        file_path = cfg["file"] if cfg else None
+        current_hash = storage.calculate_file_hash(file_path) if file_path and os.path.exists(file_path) else None
+        file_id = storage.get_schedule_file_id(item["key"], expected_hash=current_hash)
         if not file_id:
-            # Отображаем только реально загруженные расписания с готовыми превью
+            # Отображаем только реально загруженные расписания с валидным file_id
             continue
 
         results.append(

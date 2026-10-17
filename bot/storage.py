@@ -37,11 +37,11 @@ user_names_data: Dict[str, str] = {}
 last_message_times: Dict[str, float] = {}
 audit_log: List[Dict[str, Any]] = []
 
-schedule_file_ids: Dict[str, Optional[str]] = {
-    "учащихся": None,
-    "преподавателей": None,
-    "звонков": None,
-    "от учащихся": None,
+schedule_file_ids: Dict[str, Dict[str, Optional[str]]] = {
+    "учащихся": {"file_id": None, "hash": None},
+    "преподавателей": {"file_id": None, "hash": None},
+    "звонков": {"file_id": None, "hash": None},
+    "от учащихся": {"file_id": None, "hash": None},
 }
 
 last_hashes: Dict[str, Optional[str]] = {
@@ -483,7 +483,18 @@ def load_schedule_file_ids() -> None:
     if os.path.exists(SCHEDULE_FILE_IDS_FILE):
         try:
             with open(SCHEDULE_FILE_IDS_FILE, "r", encoding="utf-8") as f:
-                schedule_file_ids.update(json.load(f))
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            schedule_file_ids[k] = {
+                                "file_id": v.get("file_id"),
+                                "hash": v.get("hash"),
+                            }
+                        elif isinstance(v, str):
+                            # Старый плоский формат (только file_id без хэша) сбрасываем,
+                            # чтобы исключить отдачу неактуальных расписаний из кэша
+                            schedule_file_ids[k] = {"file_id": None, "hash": None}
         except Exception as e:
             print(f"Ошибка загрузки schedule_file_ids.json: {e}")
 
@@ -492,8 +503,39 @@ def save_schedule_file_ids() -> None:
     atomic_save_json(SCHEDULE_FILE_IDS_FILE, schedule_file_ids)
 
 
-def set_schedule_file_id(schedule_type: str, file_id: Optional[str]) -> None:
-    schedule_file_ids[schedule_type] = file_id
+def get_schedule_file_id(schedule_type: str, expected_hash: Optional[str] = None) -> Optional[str]:
+    """Возвращает file_id только если хэш совпадает с текущим файлом на диске."""
+    entry = schedule_file_ids.get(schedule_type)
+    if not entry or not isinstance(entry, dict):
+        return None
+    file_id = entry.get("file_id")
+    stored_hash = entry.get("hash")
+    if not file_id:
+        return None
+    if expected_hash is not None and stored_hash != expected_hash:
+        return None
+    return file_id
+
+
+def set_schedule_file_id(schedule_type: str, file_id: Optional[str], file_hash: Optional[str] = None) -> None:
+    """Сохраняет file_id вместе с хэшем файла на диске."""
+    if file_id is None:
+        schedule_file_ids[schedule_type] = {"file_id": None, "hash": None}
+    else:
+        schedule_file_ids[schedule_type] = {
+            "file_id": file_id,
+            "hash": file_hash,
+        }
+    save_schedule_file_ids()
+
+
+def invalidate_schedule_cache(schedule_type: Optional[str] = None) -> None:
+    """Сбрасывает кэш file_id для указанного или всех типов расписания."""
+    if schedule_type:
+        schedule_file_ids[schedule_type] = {"file_id": None, "hash": None}
+    else:
+        for k in schedule_file_ids:
+            schedule_file_ids[k] = {"file_id": None, "hash": None}
     save_schedule_file_ids()
 
 
