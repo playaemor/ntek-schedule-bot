@@ -202,9 +202,9 @@ async def ensure_schedule_cache(bot: Bot) -> None:
                 msg = await bot.send_photo(chat_id, FSInputFile(path), disable_notification=True)
                 if msg.photo:
                     storage.set_schedule_file_id(stype, msg.photo[-1].file_id)
-                await bot.delete_message(chat_id, msg.message_id)
-            except Exception as e:
-                print(f"[Cache] Ошибка кэширования {stype}: {e}")
+            except Exception:
+                # Если пользователь/админ еще не нажал /start в этом боте — кэш обновится при первом запросе
+                pass
 
 
 async def schedule_checker_loop(bot: Bot) -> None:

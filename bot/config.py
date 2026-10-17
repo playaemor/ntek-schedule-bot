@@ -1,15 +1,39 @@
 import os
 import sys
+import importlib.util
 
-# 1. Попытка загрузить настройки из корневого config.py
-try:
-    import config as local_config
-except ImportError:
-    local_config = None
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
-# 2. Поддержка как локального config.py, так и переменных окружения хостинга (bothost, docker, vps)
-BOT_TOKEN = os.getenv("BOT_TOKEN") or getattr(local_config, "BOT_TOKEN", None)
-SUPER_ADMIN_ID = os.getenv("SUPER_ADMIN_ID") or getattr(local_config, "SUPER_ADMIN_ID", "0")
+# 1. Загрузка из корневого файла config.py напрямую по пути (без проблем с sys.path)
+local_config = None
+config_path = os.path.join(BASE_DIR, "config.py")
+
+if os.path.exists(config_path):
+    try:
+        spec = importlib.util.spec_from_file_location("root_config", config_path)
+        if spec and spec.loader:
+            local_config = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(local_config)
+    except Exception as e:
+        print(f"⚠️ Предупреждение: Не удалось прочитать config.py: {e}")
+
+# 2. ПРИОРИТЕТ:
+# Если в config.py указан реальный токен — используем его!
+# Переменная окружения BOT_TOKEN используется только если в config.py токена нет.
+local_token = getattr(local_config, "BOT_TOKEN", None) if local_config else None
+if local_token and local_token != "ВАШ_ТОКЕН_БОТА":
+    BOT_TOKEN = str(local_token).strip()
+else:
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+local_admin = getattr(local_config, "SUPER_ADMIN_ID", None) if local_config else None
+if local_admin and str(local_admin) not in {"0", "ВАШ_TELEGRAM_ID"}:
+    SUPER_ADMIN_ID = str(local_admin).strip()
+else:
+    SUPER_ADMIN_ID = os.getenv("SUPER_ADMIN_ID", "0")
+
 INITIAL_ADMIN_IDS = getattr(local_config, "INITIAL_ADMIN_IDS", [])
 NTЕK_SCHEDULE_URL = getattr(
     local_config,
@@ -33,7 +57,6 @@ if not BOT_TOKEN or BOT_TOKEN == "ВАШ_ТОКЕН_БОТА":
     sys.exit(1)
 
 # Папки
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, DATA_FOLDER)
 ARCHIVE_DIR = os.path.join(DATA_DIR, "archive")
 
