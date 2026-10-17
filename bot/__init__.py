@@ -1,0 +1,3 @@
+"""
+NTЕK Schedule Bot package.
+"""
