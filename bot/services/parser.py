@@ -22,7 +22,109 @@ from bot import storage
 from bot.services.archive import archive_schedule
 
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 МБ
+VALID_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".pdf")
 is_first_check = True
+
+
+def is_valid_file_header(header: bytes) -> bool:
+    """Проверяет начальные байты файла на сигнатуры допустимых изображений или PDF."""
+    if len(header) < 4:
+        return False
+    if (
+        header.startswith(b"\xff\xd8\xff")  # JPEG
+        or header.startswith(b"\x89PNG\r\n\x1a\n")  # PNG
+        or header.startswith(b"GIF87a")
+        or header.startswith(b"GIF89a")  # GIF
+        or (header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"WEBP")  # WEBP
+        or header.startswith(b"%PDF")  # PDF
+    ):
+        return True
+    return False
+
+
+def is_valid_schedule_href(href: str) -> bool:
+    """Проверяет, что ссылка ведет на файл расписания, а не на страницу сайта (например, /index.php)."""
+    if not href:
+        return False
+    clean = href.split("?")[0].lower()
+    if clean.endswith((".php", ".html", ".htm")):
+        return False
+    if clean.endswith(VALID_EXTS):
+        return True
+    if "/documents/" in clean or "/raspisanie/" in clean:
+        return True
+    return False
+
+
+def find_schedule_link(soup: BeautifulSoup, schedule_type: str) -> Optional[str]:
+    """Находит относительный URL ссылки на расписание нужного типа."""
+    search_roots = []
+    content_area = (
+        soup.find("div", itemprop="articleBody")
+        or soup.find("article")
+        or soup.find("main")
+    )
+    if content_area:
+        search_roots.append(content_area)
+    search_roots.append(soup)
+
+    for root in search_roots:
+        if schedule_type == "учащихся":
+            # 1. Поиск по имени файла: s02112026.jpg, s_02112026.jpg, s-02112026.jpg
+            link = root.find("a", href=re.compile(r"s[-_]?\d+.*?\.(?:jpe?g|png|webp|pdf)", re.IGNORECASE))
+            if link and link.get("href") and is_valid_schedule_href(link["href"]):
+                return link["href"]
+
+            # 2. Поиск по тексту ссылки (расписание + учащиеся), указывающей на файл
+            for a in root.find_all("a", href=True):
+                text = a.get_text(strip=True).lower()
+                href = a["href"]
+                if ("расписани" in text or "занят" in text) and "учащ" in text:
+                    if is_valid_schedule_href(href):
+                        return href
+
+            # 3. Резерв: текст содержит "учащ" и ссылка ведет на валидный файл расписания
+            for a in root.find_all("a", href=True):
+                text = a.get_text(strip=True).lower()
+                href = a["href"]
+                if "учащ" in text and is_valid_schedule_href(href):
+                    return href
+
+        elif schedule_type == "преподавателей":
+            # 1. Поиск по имени файла: t02112026.jpg, t_02112026.jpg, t-02112026.jpg
+            link = root.find("a", href=re.compile(r"t[-_]?\d+.*?\.(?:jpe?g|png|webp|pdf)", re.IGNORECASE))
+            if link and link.get("href") and is_valid_schedule_href(link["href"]):
+                return link["href"]
+
+            # 2. Поиск по тексту ссылки (расписание + преподаватели), указывающей на файл
+            for a in root.find_all("a", href=True):
+                text = a.get_text(strip=True).lower()
+                href = a["href"]
+                if ("расписани" in text or "занят" in text) and "препод" in text:
+                    if is_valid_schedule_href(href):
+                        return href
+
+            # 3. Резерв: текст содержит "препод" и ссылка ведет на валидный файл расписания
+            for a in root.find_all("a", href=True):
+                text = a.get_text(strip=True).lower()
+                href = a["href"]
+                if "препод" in text and is_valid_schedule_href(href):
+                    return href
+
+        elif schedule_type == "звонков":
+            # 1. Поиск по имени файла звонков: zvonki
+            link = root.find("a", href=re.compile(r"zvonk.*?\.(?:jpe?g|png|webp|pdf)", re.IGNORECASE))
+            if link and link.get("href") and is_valid_schedule_href(link["href"]):
+                return link["href"]
+
+            # 2. Поиск по тексту ссылки (звонки)
+            for a in root.find_all("a", href=True):
+                text = a.get_text(strip=True).lower()
+                href = a["href"]
+                if "звонк" in text and is_valid_schedule_href(href):
+                    return href
+
+    return None
 
 
 async def download_and_check_update(
@@ -39,13 +141,29 @@ async def download_and_check_update(
                 print(f"Ошибка загрузки расписания {schedule_type}: статус {response.status}")
                 return False
 
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "text/html" in content_type or "text/plain" in content_type:
+                print(f"Ошибка загрузки расписания {schedule_type}: сервер вернул Content-Type '{content_type}' вместо файла расписания")
+                return False
+
             downloaded_size = 0
+            first_chunk = True
             async with aiofiles.open(temp_file, "wb") as f:
                 async for chunk in response.content.iter_chunked(8192):
+                    if first_chunk:
+                        first_chunk = False
+                        if not is_valid_file_header(chunk):
+                            raise ValueError(f"Сервер вернул недопустимый формат данных для {schedule_type} (не изображение/PDF)")
                     downloaded_size += len(chunk)
                     if downloaded_size > MAX_FILE_SIZE:
                         raise ValueError(f"Размер расписания превышает 5 МБ. Загрузка прервана.")
                     await f.write(chunk)
+
+            if downloaded_size < 100:
+                raise ValueError(f"Размер загруженного файла для {schedule_type} слишком мал ({downloaded_size} байт)")
+
+        if not storage.is_valid_schedule_file(temp_file):
+            raise ValueError(f"Загруженный файл для {schedule_type} не прошел валидацию формата.")
 
         current_hash = storage.calculate_file_hash(temp_file)
         last_hash = storage.last_hashes.get(schedule_type)
@@ -134,32 +252,33 @@ async def check_schedule_updates(bot: Bot) -> bool:
 
             soup = BeautifulSoup(html, "html.parser")
 
-            # Поиск ссылок на расписания с приоритетом по шаблону имени файла (href regex) и поиском по тексту
-            link_students = (
-                soup.find("a", href=re.compile(r"s_\d+.*\.jpe?g", re.IGNORECASE))
-                or soup.find(lambda t: t.name == "a" and "учащ" in t.get_text().lower())
-                or soup.find("a", string=re.compile(r"Расписание для учащихся", re.IGNORECASE))
-            )
+            link_students_href = find_schedule_link(soup, "учащихся")
+            link_teachers_href = find_schedule_link(soup, "преподавателей")
+            link_bells_href = find_schedule_link(soup, "звонков")
 
-            link_teachers = (
-                soup.find("a", href=re.compile(r"t_\d+.*\.jpe?g", re.IGNORECASE))
-                or soup.find(lambda t: t.name == "a" and "препод" in t.get_text().lower())
-                or soup.find("a", string=re.compile(r"Расписание для преподавателей", re.IGNORECASE))
-            )
-
-            if link_students and link_students.get("href"):
-                url = urljoin(NTЕK_SCHEDULE_URL, link_students["href"])
+            if link_students_href:
+                url = urljoin(NTЕK_SCHEDULE_URL, link_students_href)
                 temp_file = os.path.join(os.path.dirname(SCHEDULE_STUDENTS_FILE), "temp_students.jpg")
                 if await download_and_check_update(session, url, temp_file, SCHEDULE_STUDENTS_FILE, "учащихся"):
                     if not is_first_check:
                         updates.append("для учащихся")
+            else:
+                print("Предупреждение: Не найдена ссылка на расписание учащихся на сайте НТЭК.")
 
-            if link_teachers and link_teachers.get("href"):
-                url = urljoin(NTЕK_SCHEDULE_URL, link_teachers["href"])
+            if link_teachers_href:
+                url = urljoin(NTЕK_SCHEDULE_URL, link_teachers_href)
                 temp_file = os.path.join(os.path.dirname(SCHEDULE_TEACHERS_FILE), "temp_teachers.jpg")
                 if await download_and_check_update(session, url, temp_file, SCHEDULE_TEACHERS_FILE, "преподавателей"):
                     if not is_first_check:
                         updates.append("для преподавателей")
+            else:
+                print("Предупреждение: Не найдена ссылка на расписание преподавателей на сайте НТЭК.")
+
+            # Если расписание звонков отсутствует на сервере, загружаем его с сайта
+            if link_bells_href and not os.path.exists(SCHEDULE_BELLS_FILE):
+                url = urljoin(NTЕK_SCHEDULE_URL, link_bells_href)
+                temp_file = os.path.join(os.path.dirname(SCHEDULE_BELLS_FILE), "temp_bells.jpg")
+                await download_and_check_update(session, url, temp_file, SCHEDULE_BELLS_FILE, "звонков")
 
         # Проверяем, чтобы для всех актуальных файлов расписаний были закэшированы file_id
         await ensure_schedule_cache(bot)
@@ -197,15 +316,16 @@ async def ensure_schedule_cache(bot: Bot) -> None:
         return
 
     for stype, path in targets:
-        if not os.path.exists(path):
+        if not storage.is_valid_schedule_file(path):
             continue
         current_hash = storage.calculate_file_hash(path)
         cached_id = storage.get_schedule_file_id(stype, expected_hash=current_hash)
         if not cached_id:
             try:
-                msg = await bot.send_photo(chat_id, FSInputFile(path), disable_notification=True)
-                if msg.photo:
-                    storage.set_schedule_file_id(stype, msg.photo[-1].file_id, current_hash)
+                if not path.lower().endswith(".pdf"):
+                    msg = await bot.send_photo(chat_id, FSInputFile(path), disable_notification=True)
+                    if msg.photo:
+                        storage.set_schedule_file_id(stype, msg.photo[-1].file_id, current_hash)
             except Exception:
                 # Если пользователь/админ еще не нажал /start в этом боте — кэш обновится при первом запросе
                 pass

@@ -4,7 +4,9 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 
+from bot import storage
 from bot.services.archive import get_archived_items
 from bot.keyboards import get_archive_inline
 
@@ -91,14 +93,42 @@ async def handle_archive_get(call: CallbackQuery) -> None:
     if 0 <= idx < len(items):
         entry_name, file_path = items[idx]
         if os.path.exists(file_path):
+            if not storage.is_valid_schedule_file(file_path):
+                await call.answer("❌ Файл в архиве поврежден или не является изображением.", show_alert=True)
+                return
+
             await call.answer("Отправляю снимок...")
             label = format_archive_label(entry_name)
             caption = f"📦 <b>Архив:</b> {label}"
-            await call.bot.send_photo(
-                chat_id=call.from_user.id,
-                photo=FSInputFile(file_path),
-                caption=caption,
-            )
+            input_file = FSInputFile(file_path)
+
+            try:
+                if file_path.lower().endswith(".pdf"):
+                    await call.bot.send_document(
+                        chat_id=call.from_user.id,
+                        document=input_file,
+                        caption=caption,
+                    )
+                else:
+                    try:
+                        await call.bot.send_photo(
+                            chat_id=call.from_user.id,
+                            photo=input_file,
+                            caption=caption,
+                        )
+                    except TelegramBadRequest as photo_err:
+                        err_text = str(photo_err).lower()
+                        if "image_process_failed" in err_text or "photo_invalid_dimensions" in err_text:
+                            await call.bot.send_document(
+                                chat_id=call.from_user.id,
+                                document=input_file,
+                                caption=caption,
+                            )
+                        else:
+                            raise
+            except Exception as e:
+                print(f"Ошибка отправки архива: {e}")
+                await call.message.answer("❌ Не удалось отправить файл из архива.")
         else:
             await call.answer("Файл не найден на диске.", show_alert=True)
     else:

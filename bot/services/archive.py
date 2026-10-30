@@ -16,7 +16,10 @@ def get_archived_items() -> List[Tuple[str, str]]:
             continue
         full_dir = os.path.join(ARCHIVE_DIR, entry)
         if os.path.isdir(full_dir):
-            files = [f for f in os.listdir(full_dir) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+            files = [
+                f for f in os.listdir(full_dir)
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".pdf"))
+            ]
             if files:
                 items.append((entry, os.path.join(full_dir, files[0])))
 

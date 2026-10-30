@@ -90,6 +90,8 @@ async def handle_stats(message: Message) -> None:
     def file_status(path: str, stype: str) -> str:
         if not os.path.exists(path):
             return "❌ отсутствует"
+        if not storage.is_valid_schedule_file(path):
+            return "⚠️ поврежден (не изображение)"
         mtime = time.strftime("%d.%m %H:%M", time.localtime(os.path.getmtime(path)))
         curr_h = storage.calculate_file_hash(path)
         is_cached = bool(storage.get_schedule_file_id(stype, expected_hash=curr_h))

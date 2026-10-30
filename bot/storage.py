@@ -79,6 +79,28 @@ def calculate_file_hash(filename: str) -> Optional[str]:
     return sha256.hexdigest()
 
 
+def is_valid_schedule_file(filename: str) -> bool:
+    """Проверяет, существует ли файл и является ли он валидным изображением или документом (не HTML)."""
+    if not os.path.exists(filename):
+        return False
+    try:
+        if os.path.getsize(filename) < 16:
+            return False
+        with open(filename, "rb") as f:
+            header = f.read(16)
+        if (
+            header.startswith(b"\xff\xd8\xff")  # JPEG
+            or header.startswith(b"\x89PNG\r\n\x1a\n")  # PNG
+            or header.startswith(b"GIF87a") or header.startswith(b"GIF89a")  # GIF
+            or (header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"WEBP")  # WEBP
+            or header.startswith(b"%PDF")  # PDF
+        ):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 # --- Пользователи ---
 
 def load_users() -> None:
